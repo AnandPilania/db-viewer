@@ -1,0 +1,10 @@
+node_modules
+.data
+dist
+build
+.env
+*.log
+.DS_Store
+*.sqlite
+*.sqlite3
+.turbo
