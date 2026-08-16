@@ -1,16 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, lazy, Suspense } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Database, Terminal } from "lucide-react";
+import { Database, Terminal, Network, LayoutGrid } from "lucide-react";
 import { api } from "@/lib/api";
 import { localPrefs } from "@/lib/local-prefs";
 import { SchemaSidebar } from "@/components/SchemaSidebar";
 import { ConnectionsPicker } from "@/components/ConnectionsPicker";
 import { ConnectionSwitcher } from "@/components/ConnectionSwitcher";
 import { TableBrowser } from "@/components/TableBrowser";
-import { QueryEditor } from "@/components/QueryEditor";
 import { cn } from "@/lib/utils";
 
-type View = "data" | "query";
+const QueryEditor = lazy(() => import("@/components/QueryEditor").then((m) => ({ default: m.QueryEditor })));
+const ERDiagram = lazy(() => import("@/components/ERDiagram").then((m) => ({ default: m.ERDiagram })));
+const DashboardsPage = lazy(() => import("@/components/DashboardsPage").then((m) => ({ default: m.DashboardsPage })));
+
+type View = "data" | "query" | "erd" | "dashboards";
 
 export function App() {
   const [connectionId, setConnectionId] = useState<string | null>(null);
@@ -77,14 +80,40 @@ export function App() {
           >
             <Terminal size={12} /> SQL
           </button>
+          <button
+            onClick={() => setView("erd")}
+            className={cn("flex items-center gap-1 rounded px-3 py-1", view === "erd" && "bg-accent text-accent-foreground")}
+          >
+            <Network size={12} /> ER Diagram
+          </button>
+          <button
+            onClick={() => setView("dashboards")}
+            className={cn("flex items-center gap-1 rounded px-3 py-1", view === "dashboards" && "bg-accent text-accent-foreground")}
+          >
+            <LayoutGrid size={12} /> Dashboards
+          </button>
         </div>
       </div>
 
       <div className="flex flex-1 overflow-hidden">
-        <SchemaSidebar connectionId={connectionId} selectedTable={selectedTable} onSelectTable={setSelectedTable} />
+        {view !== "dashboards" && (
+          <SchemaSidebar connectionId={connectionId} selectedTable={selectedTable} onSelectTable={setSelectedTable} />
+        )}
         <div className="flex-1 overflow-hidden">
           {view === "query" ? (
-            <QueryEditor connectionId={connectionId} />
+            <Suspense
+              fallback={<div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading editor…</div>}
+            >
+              <QueryEditor connectionId={connectionId} />
+            </Suspense>
+          ) : view === "erd" ? (
+            <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading…</div>}>
+              <ERDiagram connectionId={connectionId} />
+            </Suspense>
+          ) : view === "dashboards" ? (
+            <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading…</div>}>
+              <DashboardsPage />
+            </Suspense>
           ) : selectedTable ? (
             <TableBrowser connectionId={connectionId} table={selectedTable} />
           ) : (

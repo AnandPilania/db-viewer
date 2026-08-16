@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { connectionStore } from "../connection-store.js";
 import { registry } from "../registry.js";
+import { tableEvents } from "../table-events.js";
 
 export async function connectionRoutes(app: FastifyInstance) {
   app.get("/api/drivers", async () => registry.list());
@@ -63,7 +64,7 @@ export async function connectionRoutes(app: FastifyInstance) {
     const { id, table } = req.params as { id: string; table: string };
     const body = (req.body as any) ?? {};
     const controller = new AbortController();
-    req.raw.on("close", () => controller.abort());
+    reply.raw.on("close", () => { if (!reply.raw.writableEnded) controller.abort(); });
     try {
       const conn = await connectionStore.getLive(id);
       return await conn.queryRows({
@@ -98,7 +99,7 @@ export async function connectionRoutes(app: FastifyInstance) {
     const { id, table } = req.params as { id: string; table: string };
     const { schema } = req.query as { schema?: string };
     const controller = new AbortController();
-    req.raw.on("close", () => controller.abort());
+    reply.raw.on("close", () => { if (!reply.raw.writableEnded) controller.abort(); });
     try {
       const conn = await connectionStore.getLive(id);
       return await conn.countRowsExact(table, schema, controller.signal);
@@ -112,10 +113,39 @@ export async function connectionRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const { sql, params } = req.body as { sql: string; params?: unknown[] };
     const controller = new AbortController();
-    req.raw.on("close", () => controller.abort());
+    reply.raw.on("close", () => { if (!reply.raw.writableEnded) controller.abort(); });
     try {
       const conn = await connectionStore.getLive(id);
       return await conn.execute(sql, params, controller.signal);
+    } catch (err) {
+      reply.code(400);
+      return { error: (err as Error).message };
+    }
+  });
+
+  app.post("/api/connections/:id/tables/:table/records", async (req, reply) => {
+    const { id, table } = req.params as { id: string; table: string };
+    const { schema, values } = req.body as { schema?: string; values: Record<string, unknown> };
+    try {
+      const conn = await connectionStore.getLive(id);
+      const inserted = await conn.insertRow(table, schema, values);
+      tableEvents.publish(id, table, { type: "insert", row: inserted });
+      reply.code(201);
+      return inserted;
+    } catch (err) {
+      reply.code(400);
+      return { error: (err as Error).message };
+    }
+  });
+
+  app.delete("/api/connections/:id/tables/:table/records", async (req, reply) => {
+    const { id, table } = req.params as { id: string; table: string };
+    const { schema, primaryKey } = req.body as { schema?: string; primaryKey: Record<string, unknown> };
+    try {
+      const conn = await connectionStore.getLive(id);
+      await conn.deleteRow(table, schema, primaryKey);
+      tableEvents.publish(id, table, { type: "delete", primaryKey });
+      reply.code(204);
     } catch (err) {
       reply.code(400);
       return { error: (err as Error).message };
@@ -133,6 +163,7 @@ export async function connectionRoutes(app: FastifyInstance) {
     try {
       const conn = await connectionStore.getLive(id);
       await conn.updateCell(table, schema, primaryKey, column, value);
+      tableEvents.publish(id, table, { type: "update", primaryKey, column, value });
       return { ok: true };
     } catch (err) {
       reply.code(400);

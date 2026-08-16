@@ -1,6 +1,6 @@
 {
     "name": "server",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "private": true,
     "type": "module",
     "scripts": {
@@ -10,14 +10,18 @@
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {
+        "@db-viewer/driver-clickhouse": "workspace:*",
         "@db-viewer/driver-interface": "workspace:*",
         "@db-viewer/driver-mongodb": "workspace:*",
         "@db-viewer/driver-mysql": "workspace:*",
         "@db-viewer/driver-postgres": "workspace:*",
+        "@db-viewer/driver-redis": "workspace:*",
         "@db-viewer/driver-sqlite": "workspace:*",
         "@fastify/cors": "^10.0.1",
+        "@fastify/rate-limit": "^10.2.1",
         "@fastify/websocket": "^11.0.1",
         "fastify": "^5.1.0",
+        "fastify-plugin": "^5.0.1",
         "nanoid": "^5.0.9"
     },
     "devDependencies": {

@@ -94,6 +94,14 @@ class ConnectionStore {
     this.connections.delete(id);
     this.saveToDisk();
   }
+
+  /** Closes every currently-open driver connection without deleting the saved configs. Used on graceful shutdown. */
+  async closeAll(): Promise<void> {
+    const closes = [...this.connections.values()]
+      .filter((entry) => entry.live)
+      .map((entry) => entry.live!.close().catch(() => {}));
+    await Promise.all(closes);
+  }
 }
 
 function redact(config: ConnectionConfig): ConnectionConfig {

@@ -1,16 +1,18 @@
 {
-  "name": "db-viewer",
-  "private": true,
-  "version": "0.1.0",
-  "engines": { "node": ">=18" },
-  "scripts": {
-    "dev": "pnpm --parallel --filter ./apps/* run dev",
-    "dev:server": "pnpm --filter server run dev",
-    "dev:web": "pnpm --filter web run dev",
-    "build": "pnpm -r run build",
-    "typecheck": "pnpm -r run typecheck"
-  },
-  "devDependencies": {
-    "typescript": "^5.6.3"
-  }
+    "name": "db-viewer",
+    "private": true,
+    "version": "0.2.0",
+    "engines": {
+        "node": ">=18"
+    },
+    "scripts": {
+        "dev": "pnpm --parallel --filter ./apps/* run dev",
+        "dev:server": "pnpm --filter server run dev",
+        "dev:web": "pnpm --filter web run dev",
+        "build": "pnpm -r run build",
+        "typecheck": "pnpm -r run typecheck"
+    },
+    "devDependencies": {
+        "typescript": "^5.6.3"
+    }
 }

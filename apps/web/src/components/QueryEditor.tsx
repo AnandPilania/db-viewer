@@ -1,16 +1,24 @@
 import { useState } from "react";
-import { Play, Square } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Play, Square, Download } from "lucide-react";
+import { api } from "@/lib/api";
 import { useStreamingQuery } from "@/hooks/useStreamingQuery";
 import { Button } from "@/components/ui/button";
 import { DataGrid } from "@/components/DataGrid";
+import { SqlEditor } from "@/components/SqlEditor";
 
 interface Props {
-  connectionId: string | null;
+  connectionId: string;
 }
 
 export function QueryEditor({ connectionId }: Props) {
   const [sql, setSql] = useState("SELECT * FROM ");
   const { columns, rows, state, error, durationMs, run, cancel } = useStreamingQuery(connectionId);
+
+  const { data: tables } = useQuery({
+    queryKey: ["tables", connectionId],
+    queryFn: () => api.listTables(connectionId),
+  });
 
   const inferredColumns =
     columns.length > 0
@@ -26,17 +34,37 @@ export function QueryEditor({ connectionId }: Props) {
           }))
         : [];
 
+  function downloadResults(format: "csv" | "json") {
+    const cols = inferredColumns.map((c) => c.name);
+    let content: string;
+    let mime: string;
+    if (format === "csv") {
+      const escape = (v: unknown) => {
+        if (v === null || v === undefined) return "";
+        const s = typeof v === "object" ? JSON.stringify(v) : String(v);
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      content = [cols.join(","), ...rows.map((r) => cols.map((c) => escape(r[c])).join(","))].join("\n");
+      mime = "text/csv";
+    } else {
+      content = JSON.stringify(rows, null, 2);
+      mime = "application/json";
+    }
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `query-results.${format === "csv" ? "csv" : "json"}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-border p-2">
-        <textarea
-          value={sql}
-          onChange={(e) => setSql(e.target.value)}
-          rows={3}
-          spellCheck={false}
-          className="flex-1 resize-none rounded-md border border-input bg-card p-2 font-mono text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          placeholder="SELECT * FROM my_table WHERE ..."
-        />
+      <div className="flex items-stretch gap-2 border-b border-border p-2">
+        <div className="h-28 flex-1 overflow-hidden rounded-md border border-input">
+          <SqlEditor value={sql} onChange={setSql} tables={tables} onRun={() => run(sql)} />
+        </div>
         <div className="flex flex-col gap-1">
           {state === "running" ? (
             <Button size="sm" variant="destructive" onClick={cancel}>
@@ -47,6 +75,7 @@ export function QueryEditor({ connectionId }: Props) {
               <Play size={14} /> Run
             </Button>
           )}
+          <span className="text-center text-[10px] text-muted-foreground">⌘/Ctrl+Enter</span>
         </div>
       </div>
 
@@ -60,6 +89,17 @@ export function QueryEditor({ connectionId }: Props) {
         {state === "cancelled" && <span>Cancelled after {rows.length.toLocaleString()} rows</span>}
         {state === "error" && <span className="text-destructive">{error}</span>}
         {state === "idle" && <span>Ready</span>}
+
+        {rows.length > 0 && (
+          <div className="ml-auto flex gap-1">
+            <Button size="sm" variant="ghost" onClick={() => downloadResults("csv")}>
+              <Download size={12} /> CSV
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => downloadResults("json")}>
+              <Download size={12} /> JSON
+            </Button>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-hidden">

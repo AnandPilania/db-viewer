@@ -3,6 +3,8 @@ import { sqliteDriver } from "@db-viewer/driver-sqlite";
 import { postgresDriver } from "@db-viewer/driver-postgres";
 import { mysqlDriver } from "@db-viewer/driver-mysql";
 import { mongodbDriver } from "@db-viewer/driver-mongodb";
+import { redisDriver } from "@db-viewer/driver-redis";
+import { clickhouseDriver } from "@db-viewer/driver-clickhouse";
 
 /**
  * Adding a new database = write a package implementing DatabaseDriver, then
@@ -33,3 +35,5 @@ registry.register(sqliteDriver);
 registry.register(postgresDriver);
 registry.register(mysqlDriver);
 registry.register(mongodbDriver);
+registry.register(redisDriver);
+registry.register(clickhouseDriver);

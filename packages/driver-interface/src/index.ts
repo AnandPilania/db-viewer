@@ -87,6 +87,15 @@ export interface QueryFilter {
   value?: unknown;
 }
 
+/** Emitted by drivers that support native change notification (see DriverConnection.watchTable). */
+export interface RowChangeEvent {
+  type: "insert" | "update" | "delete";
+  row?: Record<string, unknown>; // present for insert
+  primaryKey?: Record<string, unknown>; // present for update/delete
+  column?: string; // present for update
+  value?: unknown; // present for update
+}
+
 export interface QueryRowsResult {
   rows: Record<string, unknown>[];
   nextCursor: string | null; // null => no more rows
@@ -146,6 +155,26 @@ export interface DriverConnection {
 
   /** Keyset-paginated row browsing for the data grid. Never uses OFFSET. */
   queryRows(options: QueryRowsOptions): Promise<QueryRowsResult>;
+
+  /** Inserts a new record. Returns the inserted row as the driver sees it (with any DB-generated defaults filled in). */
+  insertRow(table: string, schema: string | undefined, values: Record<string, unknown>): Promise<Record<string, unknown>>;
+
+  /** Deletes the record(s) matching every column in primaryKey. */
+  deleteRow(table: string, schema: string | undefined, primaryKey: Record<string, unknown>): Promise<void>;
+
+  /**
+   * Optional: subscribe to native change notifications for a table (e.g.
+   * MongoDB Change Streams). Only implemented by drivers whose database
+   * supports this without extra setup (triggers, replication config,
+   * etc). Returns an unsubscribe function. Callers must call it exactly
+   * once when no longer interested — drivers that implement this should
+   * treat it as a reference-counted resource internally if needed.
+   */
+  watchTable?(
+    table: string,
+    schema: string | undefined,
+    onChange: (event: RowChangeEvent) => void
+  ): () => void;
 
   /** Fast, approximate — reads DB statistics, not a full scan. */
   estimateRowCount(table: string, schema?: string): Promise<RowCountEstimate>;

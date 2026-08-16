@@ -1,9 +1,12 @@
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Hash, Download } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Hash, Download, Plus, Radio } from "lucide-react";
+import type { ColumnDefinition } from "@db-viewer/driver-interface";
 import { api } from "@/lib/api";
 import { useTableRows } from "@/hooks/useTableRows";
+import { useTableRealtime } from "@/hooks/useTableRealtime";
 import { DataGrid } from "@/components/DataGrid";
+import { NewRowDialog } from "@/components/NewRowDialog";
 import { Button } from "@/components/ui/button";
 
 interface Props {
@@ -12,10 +15,16 @@ interface Props {
 }
 
 export function TableBrowser({ connectionId, table }: Props) {
-  const { rows, columns, loading, hasMore, error, loadMore } = useTableRows(connectionId, table);
+  const { rows, columns, loading, hasMore, error, loadMore, updateLocalCell, prependRow, removeLocalRowAt, applyChangeEvent } =
+    useTableRows(connectionId, table);
   const [wantExact, setWantExact] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
-  const queryClient = useQueryClient();
+  const [showNewRow, setShowNewRow] = useState(false);
+
+  // Live updates: any insert/update/delete made through this app (any tab,
+  // any user) — plus external writes too, for drivers that support native
+  // change notification (currently MongoDB via Change Streams).
+  useTableRealtime(connectionId, table, applyChangeEvent);
 
   const { data: estimate } = useQuery({
     queryKey: ["count-estimate", connectionId, table],
@@ -30,15 +39,63 @@ export function TableBrowser({ connectionId, table }: Props) {
 
   function startExport(format: "csv" | "ndjson") {
     setExportOpen(false);
-    // A plain navigation lets the browser stream the download straight to
-    // disk — no JS buffering of the (potentially huge) result set at all.
     window.location.href = `/api/connections/${connectionId}/tables/${table}/export?format=${format}`;
+  }
+
+  async function handleEditCell(rowIndex: number, column: ColumnDefinition, value: unknown): Promise<boolean> {
+    const row = rows[rowIndex];
+    const primaryKey = Object.fromEntries(
+      columns.filter((c) => c.isPrimaryKey).map((c) => [c.name, row[c.name]])
+    );
+    if (Object.keys(primaryKey).length === 0) return false;
+
+    const previous = row[column.name];
+    updateLocalCell(rowIndex, column.name, value); // optimistic
+    try {
+      await api.updateCell(connectionId, table, { primaryKey, column: column.name, value });
+      return true;
+    } catch {
+      updateLocalCell(rowIndex, column.name, previous); // rollback
+      return false;
+    }
+  }
+
+  async function handleCreateRow(values: Record<string, unknown>): Promise<{ ok: true } | { ok: false; error: string }> {
+    try {
+      const inserted = await api.insertRow(connectionId, table, { values });
+      prependRow(inserted);
+      setShowNewRow(false);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  async function handleDeleteRow(rowIndex: number) {
+    const row = rows[rowIndex];
+    const primaryKey = Object.fromEntries(
+      columns.filter((c) => c.isPrimaryKey).map((c) => [c.name, row[c.name]])
+    );
+    if (Object.keys(primaryKey).length === 0) return;
+    if (!window.confirm("Delete this row? This can't be undone.")) return;
+
+    removeLocalRowAt(rowIndex); // optimistic
+    try {
+      await api.deleteRow(connectionId, table, { primaryKey });
+    } catch {
+      prependRow(row); // rollback — simplest safe recovery, re-adds at top rather than exact position
+    }
   }
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
-        <div className="text-sm font-medium">{table}</div>
+        <div className="flex items-center gap-1.5 text-sm font-medium">
+          {table}
+          <span title="Live updates active" className="text-accent">
+            <Radio size={11} />
+          </span>
+        </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Hash size={12} />
           {exact ? (
@@ -53,6 +110,10 @@ export function TableBrowser({ connectionId, table }: Props) {
               Get exact count
             </Button>
           )}
+
+          <Button size="sm" variant="secondary" onClick={() => setShowNewRow(true)}>
+            <Plus size={12} /> New row
+          </Button>
 
           <div className="relative">
             <Button size="sm" variant="secondary" onClick={() => setExportOpen((o) => !o)}>
@@ -81,8 +142,20 @@ export function TableBrowser({ connectionId, table }: Props) {
       {error && <div className="border-b border-border bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
 
       <div className="flex-1 overflow-hidden">
-        <DataGrid columns={columns} rows={rows} loading={loading} hasMore={hasMore} onNeedMore={loadMore} />
+        <DataGrid
+          columns={columns}
+          rows={rows}
+          loading={loading}
+          hasMore={hasMore}
+          onNeedMore={loadMore}
+          onEditCell={handleEditCell}
+          onDeleteRow={columns.some((c) => c.isPrimaryKey) ? handleDeleteRow : undefined}
+        />
       </div>
+
+      {showNewRow && (
+        <NewRowDialog table={table} columns={columns} onCancel={() => setShowNewRow(false)} onSubmit={handleCreateRow} />
+      )}
     </div>
   );
 }
