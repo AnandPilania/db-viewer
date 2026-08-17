@@ -1,7 +1,6 @@
 {
     "name": "server",
-    "version": "0.2.0",
-    "private": true,
+    "version": "0.3.0",
     "type": "module",
     "scripts": {
         "dev": "tsx watch src/index.ts",
@@ -19,6 +18,7 @@
         "@db-viewer/driver-sqlite": "workspace:*",
         "@fastify/cors": "^10.0.1",
         "@fastify/rate-limit": "^10.2.1",
+        "@fastify/static": "^8.0.3",
         "@fastify/websocket": "^11.0.1",
         "fastify": "^5.1.0",
         "fastify-plugin": "^5.0.1",

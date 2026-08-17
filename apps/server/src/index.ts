@@ -1,10 +1,11 @@
 import Fastify from "fastify";
 import {
-  corsPlugin,
-  websocketPlugin,
-  rateLimitPlugin,
-  errorHandlerPlugin,
-  gracefulShutdownPlugin,
+    corsPlugin,
+    websocketPlugin,
+    rateLimitPlugin,
+    errorHandlerPlugin,
+    gracefulShutdownPlugin,
+    staticFrontendPlugin,
 } from "./plugins/index.js";
 import { connectionRoutes } from "./routes/connections.js";
 import { streamRoutes } from "./routes/stream.js";
@@ -32,8 +33,13 @@ await app.register(publicWatchRoutes);
 
 app.get("/api/health", async () => ({ ok: true }));
 
+// Registered last so its SPA-fallback 404 handler takes over from
+// errorHandlerPlugin's JSON 404 — but only once a built frontend is
+// actually found (see the plugin for details).
+await app.register(staticFrontendPlugin);
+
 const port = Number(process.env.PORT ?? 4000);
 app.listen({ port, host: "0.0.0.0" }).catch((err) => {
-  app.log.error(err);
-  process.exit(1);
+    app.log.error(err);
+    process.exit(1);
 });
