@@ -1,5 +1,5 @@
 {
-    "name": "db-viewer",
+    "name": "@pilaniaanand/db-viewer",
     "version": "0.2.0",
     "type": "module",
     "engines": {
