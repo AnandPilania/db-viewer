@@ -1,4 +1,4 @@
-import type { ConnectionConfig, DriverConnection } from "@db-viewer/driver-interface";
+import type { ConnectionConfig, DriverConnection, QuerySpec } from "@db-viewer/driver-interface";
 import type { Widget } from "./models.js";
 
 /** SQL-family drivers build a validated SQL string; MongoDB and Redis build their own native query shapes instead (see fetchMongoWidgetData / fetchRedisWidgetData). ClickHouse is SQL too, but its driver's streamQuery doesn't bind params (see chLiteral below), so it gets literal-embedded values instead of placeholders. */
@@ -20,9 +20,9 @@ function chLiteral(value: unknown): string {
   return `'${String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
 }
 
-async function collectRows(conn: DriverConnection, sql: string, params: unknown[]): Promise<Record<string, unknown>[]> {
+async function collectRows(conn: DriverConnection, query: QuerySpec): Promise<Record<string, unknown>[]> {
   const rows: Record<string, unknown>[] = [];
-  for await (const chunk of conn.streamQuery({ sql, params })) {
+  for await (const chunk of conn.streamQuery({ query })) {
     rows.push(...chunk.rows);
   }
   return rows;
@@ -80,7 +80,7 @@ export async function fetchWidgetData(
   const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
 
   if (widget.chartType === "table") {
-    const rows = await collectRows(conn, `SELECT * FROM ${tableRef} ${whereSql} LIMIT 50`, params);
+    const rows = await collectRows(conn, { language: "sql", sql: `SELECT * FROM ${tableRef} ${whereSql} LIMIT 50`, params });
     return { rows, xKey: "", yKey: "" };
   }
 
@@ -90,7 +90,7 @@ export async function fetchWidgetData(
       : `${widget.aggregation.toUpperCase()}(${quoteIdent(driver, widget.yField!)})`;
 
   if (widget.chartType === "number") {
-    const rows = await collectRows(conn, `SELECT ${yExpr} AS y FROM ${tableRef} ${whereSql}`, params);
+    const rows = await collectRows(conn, { language: "sql", sql: `SELECT ${yExpr} AS y FROM ${tableRef} ${whereSql}`, params });
     return { rows, xKey: "", yKey: "y" };
   }
 
@@ -98,7 +98,7 @@ export async function fetchWidgetData(
   if (!widget.xField) throw new Error(`${widget.chartType} charts need an x-axis column`);
   const xIdent = quoteIdent(driver, widget.xField);
   const sql = `SELECT ${xIdent} AS x, ${yExpr} AS y FROM ${tableRef} ${whereSql} GROUP BY ${xIdent} ORDER BY y DESC LIMIT 50`;
-  const rows = await collectRows(conn, sql, params);
+  const rows = await collectRows(conn, { language: "sql", sql, params });
   return { rows, xKey: "x", yKey: "y" };
 }
 
@@ -123,7 +123,7 @@ async function fetchMongoWidgetData(conn: DriverConnection, widget: Widget): Pro
   for (const f of widget.filters ?? []) match[f.column] = f.value;
 
   if (widget.chartType === "table") {
-    const rows = await collectRows(conn, JSON.stringify({ collection: widget.table, filter: match, limit: 50 }), []);
+    const rows = await collectRows(conn, { language: "mongo", collection: widget.table, filter: match, limit: 50 });
     return { rows, xKey: "", yKey: "" };
   }
 
@@ -136,7 +136,7 @@ async function fetchMongoWidgetData(conn: DriverConnection, widget: Widget): Pro
   if (widget.chartType === "number") {
     pipeline.push({ $group: { _id: null, y: accumulator } });
     pipeline.push({ $project: { _id: 0, y: 1 } });
-    const rows = await collectRows(conn, JSON.stringify({ collection: widget.table, pipeline }), []);
+    const rows = await collectRows(conn, { language: "mongo", collection: widget.table, pipeline });
     return { rows, xKey: "", yKey: "y" };
   }
 
@@ -147,7 +147,7 @@ async function fetchMongoWidgetData(conn: DriverConnection, widget: Widget): Pro
   pipeline.push({ $limit: 50 });
   pipeline.push({ $project: { x: "$_id", y: 1, _id: 0 } });
 
-  const rows = await collectRows(conn, JSON.stringify({ collection: widget.table, pipeline }), []);
+  const rows = await collectRows(conn, { language: "mongo", collection: widget.table, pipeline });
   return { rows, xKey: "x", yKey: "y" };
 }
 

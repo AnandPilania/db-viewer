@@ -5,9 +5,11 @@ import type {
   ConnectionConfig,
   DatabaseDriver,
   DriverConnection,
+  ExecSpec,
   QueryExecResult,
   QueryRowsOptions,
   QueryRowsResult,
+  RedisKeyType,
   RowChangeEvent,
   RowCountEstimate,
   RowCountExact,
@@ -30,13 +32,14 @@ import type {
  *    cursor string — they're already the same concept. SCAN's COUNT is
  *    only a hint, so we loop internally until a full page is gathered or
  *    the scan completes.
- *  - `streamQuery`'s `sql` field is JSON: `{"type":"hash","pattern":"user:*","limit":5000}`.
- *  - `execute`'s `sql` field is JSON: `{"command":["SET","foo","bar"]}` — a
- *    raw Redis command, since Redis has no query language of its own.
+ *  - `streamQuery`/`execute` take the `redis-command` variant of
+ *    QuerySpec/ExecSpec: a raw command + args array, e.g.
+ *    `{ command: ["SCAN", "0", "MATCH", "user:*"] }`, since Redis has no
+ *    query language of its own — the query editor UI presents this as a
+ *    JSON command builder rather than a SQL box.
  */
 
-const KEY_TYPES = ["string", "hash", "list", "set", "zset", "stream"] as const;
-type RedisKeyType = (typeof KEY_TYPES)[number];
+const KEY_TYPES = ["string", "hash", "list", "set", "zset", "stream"] as const satisfies readonly RedisKeyType[];
 
 const PREVIEW_LIMIT = 20;
 const STRING_PREVIEW_CHARS = 500;
@@ -190,12 +193,10 @@ class RedisConnection implements DriverConnection {
   }
 
   async *streamQuery(options: StreamQueryOptions): AsyncIterableIterator<QueryRowsResult> {
-    let spec: { type: RedisKeyType; pattern?: string; limit?: number };
-    try {
-      spec = JSON.parse(options.sql);
-    } catch {
-      throw new Error('Redis queries are JSON, e.g. {"type":"hash","pattern":"user:*","limit":5000}');
+    if (options.query.language !== "redis-command") {
+      throw new Error(`Redis only supports redis-command queries, got "${options.query.language}"`);
     }
+    const spec = options.query;
     if (!KEY_TYPES.includes(spec.type)) throw new Error(`"type" must be one of ${KEY_TYPES.join(", ")}`);
 
     const chunkSize = options.chunkSize ?? 500;
@@ -227,18 +228,15 @@ class RedisConnection implements DriverConnection {
     if (batch.length) yield { rows: batch, nextCursor: null, columns: columnsFor(spec.type) };
   }
 
-  async execute(sql: string): Promise<QueryExecResult> {
+  async execute(query: ExecSpec): Promise<QueryExecResult> {
+    if (query.language !== "redis-command") {
+      throw new Error(`Redis only supports redis-command queries, got "${query.language}"`);
+    }
+    if (!Array.isArray(query.command) || query.command.length === 0) {
+      throw new Error('Missing "command" array, e.g. { command: ["DEL", "foo"] }');
+    }
     const start = performance.now();
-    let cmd: { command: string[] };
-    try {
-      cmd = JSON.parse(sql);
-    } catch {
-      throw new Error('Redis commands are JSON, e.g. {"command":["SET","foo","bar"]}');
-    }
-    if (!Array.isArray(cmd.command) || cmd.command.length === 0) {
-      throw new Error('Missing "command" array, e.g. {"command":["DEL","foo"]}');
-    }
-    const result = await this.client.sendCommand(cmd.command.map(String));
+    const result = await this.client.sendCommand(query.command.map(String));
     return {
       columns: [],
       affectedRows: typeof result === "number" ? result : undefined,
@@ -419,7 +417,7 @@ function buildUrl(config: ConnectionConfig): string {
 export const redisDriver: DatabaseDriver = {
   key: "redis",
   displayName: "Redis",
-  capabilities: { transactions: false, schemas: false, streaming: true, cancellation: true },
+  capabilities: { transactions: false, schemas: false, streaming: true, cancellation: true, queryLanguage: "redis-command" },
 
   async testConnection(config: ConnectionConfig) {
     const client = createClient({ url: buildUrl(config), socket: { connectTimeout: 5000 } });

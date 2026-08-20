@@ -47,6 +47,24 @@ response completes.
 
 ## Quick start
 
+**Single command (production-style — one process, one port):**
+
+```bash
+pnpm install
+pnpm approve-builds better-sqlite3 esbuild   # one-time, compiles the native sqlite binding
+npx .
+```
+
+This builds the frontend on first run (subsequent starts skip that), then
+starts the server, which serves both the API and the built frontend from
+the same port (`http://localhost:4000` by default — set `PORT` to change
+it) and opens your browser automatically (set `DB_VIEWER_NO_OPEN=1` to skip
+that). Once published to npm, the same experience will be `npx db-viewer`.
+Ctrl+C shuts everything down cleanly, including every open database
+connection (see the plugin system below).
+
+**Two-terminal dev workflow** (hot reload on both sides):
+
 ```bash
 pnpm install
 pnpm approve-builds better-sqlite3 esbuild   # one-time, compiles the native sqlite binding
@@ -58,8 +76,23 @@ pnpm dev:server   # Fastify on :4000
 pnpm dev:web      # Vite on :5173, proxies /api and /ws to :4000
 ```
 
-Open http://localhost:5173, connect to a SQLite file (or a Postgres database),
-and browse.
+Either way, connect to a SQLite file (or any of the other 5 drivers) and
+browse.
+
+## Keyboard support
+
+- **Ctrl/⌘ K** — command palette: jump to any view, switch connection or
+  table, without touching the mouse
+- **?** — keyboard shortcuts help (suppressed while typing in a text field,
+  since `?` is a normal character there)
+- **Data grid** — arrow keys move the focused cell (scrolling virtualized
+  rows into view as needed), Enter opens it for editing, Escape cancels,
+  Delete/Backspace deletes the focused row (still behind a confirm)
+- **SQL editor** — Ctrl/⌘ Enter runs the query
+- Every dialog (new row, widget create/edit, command palette, shortcuts
+  help) traps Tab focus inside itself, closes on Escape, and returns focus
+  to whatever opened it — built on one shared `Modal` wrapper
+  (`components/ui/modal.tsx`) rather than repeated per dialog
 
 ## How it scales to very large tables
 

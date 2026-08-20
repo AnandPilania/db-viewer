@@ -1,8 +1,14 @@
 import type { FastifyInstance } from "fastify";
+import type { QuerySpec } from "@db-viewer/driver-interface";
 import { connectionStore } from "../connection-store.js";
 
 /**
- * Client sends: { type: "run", sql: string, params?: unknown[] }
+ * Client sends: { type: "run", query: QuerySpec }
+ *   QuerySpec is a discriminated union on `language` — "sql" | "mongo" |
+ *   "redis-command" — matching the connection's driver.capabilities.queryLanguage
+ *   (see @db-viewer/driver-interface and GET /api/drivers). The client is
+ *   expected to build the right shape; the server does not attempt to
+ *   translate between languages.
  * Server sends repeated: { type: "chunk", rows: [...], columns: [...] }
  *          then:         { type: "done", durationMs }
  *          or on error:  { type: "error", message }
@@ -28,11 +34,16 @@ export async function streamRoutes(app: FastifyInstance) {
       }
 
       if (msg.type === "run") {
+        const query = msg.query as QuerySpec | undefined;
+        if (!query || typeof query.language !== "string") {
+          socket.send(JSON.stringify({ type: "error", message: 'Missing or invalid "query" in run message' }));
+          return;
+        }
         controller = new AbortController();
         const start = performance.now();
         try {
           const conn = await connectionStore.getLive(id);
-          for await (const chunk of conn.streamQuery({ sql: msg.sql, params: msg.params, signal: controller.signal })) {
+          for await (const chunk of conn.streamQuery({ query, signal: controller.signal })) {
             if (controller.signal.aborted) break;
             socket.send(JSON.stringify({ type: "chunk", rows: chunk.rows, columns: chunk.columns }));
           }

@@ -6,6 +6,7 @@ import type {
   ConnectionConfig,
   DatabaseDriver,
   DriverConnection,
+  ExecSpec,
   QueryExecResult,
   QueryRowsOptions,
   QueryRowsResult,
@@ -186,6 +187,10 @@ class MysqlConnection implements DriverConnection {
   }
 
   async *streamQuery(options: StreamQueryOptions): AsyncIterableIterator<QueryRowsResult> {
+    if (options.query.language !== "sql") {
+      throw new Error(`MySQL only supports SQL queries, got "${options.query.language}"`);
+    }
+    const { sql, params = [] } = options.query;
     const conn = await this.pool.getConnection();
     const chunkSize = options.chunkSize ?? 500;
     try {
@@ -199,7 +204,7 @@ class MysqlConnection implements DriverConnection {
           params: unknown[]
         ): { stream(opts: { highWaterMark: number }): import("node:stream").Readable };
       };
-      const stream = rawConnection.query(options.sql, options.params ?? []).stream({ highWaterMark: chunkSize });
+      const stream = rawConnection.query(sql, params).stream({ highWaterMark: chunkSize });
       let batch: Record<string, unknown>[] = [];
 
       const onAbort = () => stream.destroy();
@@ -223,9 +228,12 @@ class MysqlConnection implements DriverConnection {
     }
   }
 
-  async execute(sql: string, params: unknown[] = []): Promise<QueryExecResult> {
+  async execute(query: ExecSpec): Promise<QueryExecResult> {
+    if (query.language !== "sql") {
+      throw new Error(`MySQL only supports SQL queries, got "${query.language}"`);
+    }
     const start = performance.now();
-    const [result] = await this.pool.query(sql, params);
+    const [result] = await this.pool.query(query.sql, query.params ?? []);
     const affectedRows = Array.isArray(result) ? result.length : (result as ResultSetHeader).affectedRows;
     return { columns: [], affectedRows, durationMs: performance.now() - start };
   }
@@ -283,7 +291,7 @@ class MysqlConnection implements DriverConnection {
 export const mysqlDriver: DatabaseDriver = {
   key: "mysql",
   displayName: "MySQL",
-  capabilities: { transactions: true, schemas: false, streaming: true, cancellation: true },
+  capabilities: { transactions: true, schemas: false, streaming: true, cancellation: true, queryLanguage: "sql" },
 
   async testConnection(config: ConnectionConfig) {
     try {

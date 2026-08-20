@@ -17,6 +17,8 @@
  *  - Everything long-running is cancellable via an AbortSignal.
  */
 
+export type QueryLanguage = "sql" | "mongo" | "redis-command";
+
 export type ColumnType =
   | "string"
   | "number"
@@ -113,9 +115,60 @@ export interface RowCountExact {
   exact: true;
 }
 
+/**
+ * A read query in whatever shape the target driver's queryLanguage expects,
+ * used by streamQuery(). Discriminated on `language` so each driver's
+ * implementation only has to handle the one variant matching its own
+ * `capabilities.queryLanguage` — TypeScript rejects the others at compile
+ * time, and callers (the query editor UI, the stream route) never need to
+ * guess or JSON.parse a string to figure out what they're holding.
+ */
+export type RedisKeyType = "string" | "hash" | "list" | "set" | "zset" | "stream";
+
+export type QuerySpec =
+  | { language: "sql"; sql: string; params?: unknown[] }
+  | {
+      language: "mongo";
+      collection: string;
+      /** Either a find() (filter/sort/limit) or an aggregate() (pipeline) — not both. */
+      filter?: Record<string, unknown>;
+      sort?: Record<string, 1 | -1>;
+      limit?: number;
+      pipeline?: Record<string, unknown>[];
+    }
+  | {
+      language: "redis-command";
+      /** Browse keys of one type (SCAN under the hood) — see DriverConnection.queryRows for the "table" equivalent. */
+      type: RedisKeyType;
+      pattern?: string;
+      limit?: number;
+    };
+
+/**
+ * A write/DDL query for execute(). Separate from QuerySpec because a
+ * driver's write shape can genuinely differ from its read shape (e.g.
+ * MongoDB reads via filter/sort/pipeline but writes via an explicit
+ * op + filter/update/doc) — forcing them into one type would leave unused
+ * fields on one side or the other.
+ */
+export type ExecSpec =
+  | { language: "sql"; sql: string; params?: unknown[] }
+  | {
+      language: "mongo";
+      op: "insertOne" | "updateOne" | "deleteOne" | "deleteMany";
+      collection: string;
+      filter?: Record<string, unknown>;
+      update?: Record<string, unknown>;
+      doc?: Record<string, unknown>;
+    }
+  | {
+      language: "redis-command";
+      /** Raw write command + args, e.g. ["SET", "foo", "bar"] or ["DEL", "foo"]. */
+      command: string[];
+    };
+
 export interface StreamQueryOptions {
-  sql: string;
-  params?: unknown[];
+  query: QuerySpec;
   chunkSize?: number; // rows per emitted chunk, default driver-defined
   signal?: AbortSignal;
 }
@@ -139,6 +192,7 @@ export interface DatabaseDriver {
     schemas: boolean; // does this DB have a schema/namespace concept above "table"?
     streaming: boolean;
     cancellation: boolean;
+    queryLanguage: QueryLanguage; // what shape of query streamQuery()/execute() expect — drives the UI's editor mode
   };
 
   testConnection(config: ConnectionConfig): Promise<{ ok: boolean; message?: string }>;
@@ -185,8 +239,8 @@ export interface DriverConnection {
   /** Arbitrary SQL/query execution for the query editor, streamed in chunks. */
   streamQuery(options: StreamQueryOptions): AsyncIterableIterator<QueryRowsResult>;
 
-  /** Non-SELECT execution (INSERT/UPDATE/DELETE/DDL), also cancellable. */
-  execute(sql: string, params?: unknown[], signal?: AbortSignal): Promise<QueryExecResult>;
+  /** Non-SELECT execution (INSERT/UPDATE/DELETE/DDL, a mongo write command, or a redis write command), also cancellable. */
+  execute(query: ExecSpec, signal?: AbortSignal): Promise<QueryExecResult>;
 
   updateCell(
     table: string,

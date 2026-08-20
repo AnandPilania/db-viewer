@@ -7,6 +7,7 @@ import type {
   ConnectionConfig,
   DatabaseDriver,
   DriverConnection,
+  ExecSpec,
   QueryExecResult,
   QueryRowsOptions,
   QueryRowsResult,
@@ -230,10 +231,14 @@ class PostgresConnection implements DriverConnection {
   }
 
   async *streamQuery(options: StreamQueryOptions): AsyncIterableIterator<QueryRowsResult> {
+    if (options.query.language !== "sql") {
+      throw new Error(`PostgreSQL only supports SQL queries, got "${options.query.language}"`);
+    }
+    const { sql, params = [] } = options.query;
     const client = await this.pool.connect();
     const chunkSize = options.chunkSize ?? 500;
     try {
-      const cursor = client.query(new Cursor(options.sql, options.params ?? []));
+      const cursor = client.query(new Cursor(sql, params));
       const onAbort = () => cursor.close(() => {});
       options.signal?.addEventListener("abort", onAbort, { once: true });
       try {
@@ -258,9 +263,12 @@ class PostgresConnection implements DriverConnection {
     }
   }
 
-  async execute(sql: string, params: unknown[] = []): Promise<QueryExecResult> {
+  async execute(query: ExecSpec): Promise<QueryExecResult> {
+    if (query.language !== "sql") {
+      throw new Error(`PostgreSQL only supports SQL queries, got "${query.language}"`);
+    }
     const start = performance.now();
-    const result = await this.pool.query(sql, params);
+    const result = await this.pool.query(query.sql, query.params ?? []);
     const columns: ColumnDefinition[] = (result.fields ?? []).map((f) => ({
       name: f.name,
       type: "unknown",
@@ -407,7 +415,7 @@ class PostgresConnection implements DriverConnection {
 export const postgresDriver: DatabaseDriver = {
   key: "postgres",
   displayName: "PostgreSQL",
-  capabilities: { transactions: true, schemas: true, streaming: true, cancellation: true },
+  capabilities: { transactions: true, schemas: true, streaming: true, cancellation: true, queryLanguage: "sql" },
 
   async testConnection(config: ConnectionConfig) {
     const pool = new Pool({

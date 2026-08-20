@@ -6,6 +6,7 @@ import type {
   ConnectionConfig,
   DatabaseDriver,
   DriverConnection,
+  ExecSpec,
   QueryExecResult,
   QueryRowsOptions,
   QueryRowsResult,
@@ -23,9 +24,9 @@ import type {
  *  - "table" == collection name, "schema" is unused (always the connected database)
  *  - "columns" are inferred by sampling documents, not read from a catalog
  *  - primary key is always `_id`; cursor pagination keys off it
- *  - `streamQuery`'s `sql` field is repurposed as a JSON string:
- *    `{ "collection": "users", "filter": {...}, "sort": {...}, "limit": 5000 }`
- *    This keeps the query editor usable without pretending Mongo has SQL.
+ *  - `streamQuery`/`execute` take the `mongo` variant of QuerySpec/ExecSpec
+ *    (see @db-viewer/driver-interface) instead of a SQL string — the query
+ *    editor UI renders a JSON form for this driver's `capabilities.queryLanguage`.
  */
 
 const SAMPLE_SIZE = 50;
@@ -173,24 +174,19 @@ class MongoConnection implements DriverConnection {
   }
 
   async *streamQuery(options: StreamQueryOptions): AsyncIterableIterator<QueryRowsResult> {
-    const chunkSize = options.chunkSize ?? 500;
-    let spec: { collection: string; filter?: Document; sort?: Sort; limit?: number; pipeline?: Document[] };
-    try {
-      spec = JSON.parse(options.sql);
-    } catch {
-      throw new Error(
-        'MongoDB queries are JSON, e.g. {"collection":"users","filter":{"active":true},"limit":1000} ' +
-          'or an aggregation: {"collection":"users","pipeline":[{"$group":{"_id":"$city","n":{"$sum":1}}}]}'
-      );
+    if (options.query.language !== "mongo") {
+      throw new Error(`MongoDB only supports mongo-shaped queries, got "${options.query.language}"`);
     }
-    if (!spec.collection) throw new Error('Missing "collection" in query JSON');
+    const spec = options.query;
+    if (!spec.collection) throw new Error('Missing "collection" in query');
 
+    const chunkSize = options.chunkSize ?? 500;
     const coll = this.db.collection(spec.collection);
     // `pipeline` runs a real aggregation (used by dashboard charts for
     // grouping/aggregating); otherwise fall back to a plain find+sort+limit.
     const cursor = spec.pipeline
       ? coll.aggregate(spec.pipeline)
-      : coll.find(spec.filter ?? {}).sort(spec.sort ?? { _id: 1 });
+      : coll.find(spec.filter ?? {}).sort((spec.sort ?? { _id: 1 }) as Sort);
     if (!spec.pipeline && spec.limit) (cursor as ReturnType<Collection<Document>["find"]>).limit(spec.limit);
 
     const onAbort = () => cursor.close();
@@ -213,29 +209,24 @@ class MongoConnection implements DriverConnection {
     }
   }
 
-  async execute(sql: string): Promise<QueryExecResult> {
-    // JSON command form: {"op":"insertOne"|"updateOne"|"deleteOne"|"deleteMany","collection":"x", ...}
+  async execute(query: ExecSpec): Promise<QueryExecResult> {
+    if (query.language !== "mongo") {
+      throw new Error(`MongoDB only supports mongo-shaped commands, got "${query.language}"`);
+    }
     const start = performance.now();
-    const cmd = JSON.parse(sql) as {
-      op: "insertOne" | "updateOne" | "deleteOne" | "deleteMany";
-      collection: string;
-      filter?: Document;
-      update?: Document;
-      doc?: Document;
-    };
-    const coll = this.db.collection(cmd.collection);
+    const coll = this.db.collection(query.collection);
     let affectedRows = 0;
-    if (cmd.op === "insertOne") {
-      await coll.insertOne(cmd.doc ?? {});
+    if (query.op === "insertOne") {
+      await coll.insertOne((query.doc ?? {}) as Document);
       affectedRows = 1;
-    } else if (cmd.op === "updateOne") {
-      const res = await coll.updateOne(cmd.filter ?? {}, cmd.update ?? {});
+    } else if (query.op === "updateOne") {
+      const res = await coll.updateOne((query.filter ?? {}) as Document, (query.update ?? {}) as Document);
       affectedRows = res.modifiedCount;
-    } else if (cmd.op === "deleteOne") {
-      const res = await coll.deleteOne(cmd.filter ?? {});
+    } else if (query.op === "deleteOne") {
+      const res = await coll.deleteOne((query.filter ?? {}) as Document);
       affectedRows = res.deletedCount;
-    } else if (cmd.op === "deleteMany") {
-      const res = await coll.deleteMany(cmd.filter ?? {});
+    } else if (query.op === "deleteMany") {
+      const res = await coll.deleteMany((query.filter ?? {}) as Document);
       affectedRows = res.deletedCount;
     }
     return { columns: [], affectedRows, durationMs: performance.now() - start };
@@ -323,7 +314,7 @@ function buildConnectionString(config: ConnectionConfig): string {
 export const mongodbDriver: DatabaseDriver = {
   key: "mongodb",
   displayName: "MongoDB",
-  capabilities: { transactions: false, schemas: false, streaming: true, cancellation: true },
+  capabilities: { transactions: false, schemas: false, streaming: true, cancellation: true, queryLanguage: "mongo" },
 
   async testConnection(config: ConnectionConfig) {
     const client = new MongoClient(buildConnectionString(config), { serverSelectionTimeoutMS: 5000 });

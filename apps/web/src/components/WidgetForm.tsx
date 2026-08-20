@@ -5,6 +5,7 @@ import { dashboardApi, type Widget } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Modal } from "@/components/ui/modal";
 
 interface Props {
   onCancel: () => void;
@@ -78,10 +79,12 @@ export function WidgetForm({ onCancel, onSaved, editingWidget }: Props) {
   }
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/60">
+    <Modal onClose={onCancel} labelledBy="widget-form-title">
       <Card className="w-full max-w-md">
         <CardHeader>
-          <span className="text-sm font-medium">{editingWidget ? "Edit widget" : "New widget"}</span>
+          <span id="widget-form-title" className="text-sm font-medium">
+            {editingWidget ? "Edit widget" : "New widget"}
+          </span>
         </CardHeader>
         <CardContent className="max-h-[75vh] space-y-3 overflow-y-auto">
           <div className="space-y-1">
@@ -202,7 +205,11 @@ export function WidgetForm({ onCancel, onSaved, editingWidget }: Props) {
             </>
           )}
 
-          {error && <div className="text-xs text-destructive">{error}</div>}
+          {error && (
+            <div role="alert" className="text-xs text-destructive">
+              {error}
+            </div>
+          )}
 
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="ghost" size="sm" onClick={onCancel} disabled={saving}>
@@ -214,6 +221,6 @@ export function WidgetForm({ onCancel, onSaved, editingWidget }: Props) {
           </div>
         </CardContent>
       </Card>
-    </div>
+    </Modal>
   );
 }

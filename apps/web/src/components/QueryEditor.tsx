@@ -1,19 +1,35 @@
-import { useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Play, Square, Download } from "lucide-react";
+import type { QuerySpec } from "@db-viewer/driver-interface";
 import { api } from "@/lib/api";
 import { useStreamingQuery } from "@/hooks/useStreamingQuery";
 import { Button } from "@/components/ui/button";
 import { DataGrid } from "@/components/DataGrid";
 import { SqlEditor } from "@/components/SqlEditor";
+import { MongoQueryEditor, type QueryEditorHandle } from "@/components/MongoQueryEditor";
+import { RedisQueryEditor } from "@/components/RedisQueryEditor";
 
 interface Props {
   connectionId: string;
+  driver: string; // registry key, e.g. "postgres", "mongodb", "redis" — from ConnectionConfig.driver
 }
 
-export function QueryEditor({ connectionId }: Props) {
+export function QueryEditor({ connectionId, driver }: Props) {
   const [sql, setSql] = useState("SELECT * FROM ");
   const { columns, rows, state, error, durationMs, run, cancel } = useStreamingQuery(connectionId);
+  const nonSqlEditorRef = useRef<QueryEditorHandle>(null);
+
+  const { data: driversInfo } = useQuery({
+    queryKey: ["drivers"],
+    queryFn: api.listDrivers,
+    staleTime: Infinity, // capabilities don't change at runtime
+  });
+
+  const queryLanguage = useMemo(
+    () => driversInfo?.active.find((d) => d.key === driver)?.capabilities.queryLanguage ?? "sql",
+    [driversInfo, driver]
+  );
 
   const { data: tables } = useQuery({
     queryKey: ["tables", connectionId],
@@ -59,19 +75,40 @@ export function QueryEditor({ connectionId }: Props) {
     URL.revokeObjectURL(url);
   }
 
+  function runSql() {
+    run({ language: "sql", sql });
+  }
+
+  function runNonSql(query: QuerySpec) {
+    run(query);
+  }
+
+  function handleRunClick() {
+    if (queryLanguage === "sql") runSql();
+    else nonSqlEditorRef.current?.run();
+  }
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-stretch gap-2 border-b border-border p-2">
-        <div className="h-28 flex-1 overflow-hidden rounded-md border border-input">
-          <SqlEditor value={sql} onChange={setSql} tables={tables} onRun={() => run(sql)} />
-        </div>
+        {queryLanguage === "sql" && (
+          <div className="h-28 flex-1 overflow-hidden rounded-md border border-input">
+            <SqlEditor value={sql} onChange={setSql} tables={tables} onRun={runSql} />
+          </div>
+        )}
+        {queryLanguage === "mongo" && (
+          <MongoQueryEditor ref={nonSqlEditorRef} collections={tables} onRun={runNonSql} disabled={state === "running"} />
+        )}
+        {queryLanguage === "redis-command" && (
+          <RedisQueryEditor ref={nonSqlEditorRef} onRun={runNonSql} disabled={state === "running"} />
+        )}
         <div className="flex flex-col gap-1">
           {state === "running" ? (
             <Button size="sm" variant="destructive" onClick={cancel}>
               <Square size={14} /> Cancel
             </Button>
           ) : (
-            <Button size="sm" onClick={() => run(sql)} disabled={!connectionId}>
+            <Button size="sm" onClick={handleRunClick} disabled={!connectionId}>
               <Play size={14} /> Run
             </Button>
           )}

@@ -1,6 +1,7 @@
 {
     "name": "server",
-    "version": "0.3.0",
+    "version": "0.3.2",
+    "private": true,
     "type": "module",
     "scripts": {
         "dev": "tsx watch src/index.ts",
@@ -9,13 +10,7 @@
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {
-        "@db-viewer/driver-clickhouse": "workspace:*",
         "@db-viewer/driver-interface": "workspace:*",
-        "@db-viewer/driver-mongodb": "workspace:*",
-        "@db-viewer/driver-mysql": "workspace:*",
-        "@db-viewer/driver-postgres": "workspace:*",
-        "@db-viewer/driver-redis": "workspace:*",
-        "@db-viewer/driver-sqlite": "workspace:*",
         "@fastify/cors": "^10.0.1",
         "@fastify/rate-limit": "^10.2.1",
         "@fastify/static": "^8.0.3",
@@ -23,6 +18,13 @@
         "fastify": "^5.1.0",
         "fastify-plugin": "^5.0.1",
         "nanoid": "^5.0.9"
+    },
+    "optionalDependencies": {
+        "@db-viewer/driver-clickhouse": "workspace:*",
+        "@db-viewer/driver-mongodb": "workspace:*",
+        "@db-viewer/driver-mysql": "workspace:*",
+        "@db-viewer/driver-postgres": "workspace:*",
+        "@db-viewer/driver-redis": "workspace:*"
     },
     "devDependencies": {
         "@types/node": "^22.9.0",

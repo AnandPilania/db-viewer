@@ -115,19 +115,27 @@ export function TableBrowser({ connectionId, table }: Props) {
             <Plus size={12} /> New row
           </Button>
 
-          <div className="relative">
-            <Button size="sm" variant="secondary" onClick={() => setExportOpen((o) => !o)}>
+          <div className="relative" onKeyDown={(e) => e.key === "Escape" && setExportOpen(false)}>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setExportOpen((o) => !o)}
+              aria-haspopup="menu"
+              aria-expanded={exportOpen}
+            >
               <Download size={12} /> Export
             </Button>
             {exportOpen && (
-              <div className="absolute right-0 top-full z-20 mt-1 w-32 rounded-md border border-border bg-card shadow-lg">
+              <div role="menu" className="absolute right-0 top-full z-20 mt-1 w-32 rounded-md border border-border bg-card shadow-lg">
                 <button
+                  role="menuitem"
                   onClick={() => startExport("csv")}
                   className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/60"
                 >
                   CSV
                 </button>
                 <button
+                  role="menuitem"
                   onClick={() => startExport("ndjson")}
                   className="block w-full px-3 py-2 text-left text-xs hover:bg-muted/60"
                 >

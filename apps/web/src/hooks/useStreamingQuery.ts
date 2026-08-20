@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import type { ColumnDefinition } from "@db-viewer/driver-interface";
+import type { ColumnDefinition, QuerySpec } from "@db-viewer/driver-interface";
 
 type StreamState = "idle" | "running" | "done" | "error" | "cancelled";
 
@@ -22,7 +22,7 @@ export function useStreamingQuery(connectionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
 
   const run = useCallback(
-    (sql: string) => {
+    (query: QuerySpec) => {
       if (!connectionId) return;
       wsRef.current?.close();
 
@@ -32,7 +32,7 @@ export function useStreamingQuery(connectionId: string | null) {
       const ws = new WebSocket(`${protocol}//${window.location.host}/ws/connections/${connectionId}/stream`);
       wsRef.current = ws;
 
-      ws.onopen = () => ws.send(JSON.stringify({ type: "run", sql }));
+      ws.onopen = () => ws.send(JSON.stringify({ type: "run", query }));
 
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);

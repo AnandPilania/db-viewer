@@ -4,6 +4,7 @@ import type {
   ConnectionConfig,
   DatabaseDriver,
   DriverConnection,
+  ExecSpec,
   QueryExecResult,
   QueryRowsOptions,
   QueryRowsResult,
@@ -233,8 +234,11 @@ class ClickHouseConnection implements DriverConnection {
   }
 
   async *streamQuery(options: StreamQueryOptions): AsyncIterableIterator<QueryRowsResult> {
+    if (options.query.language !== "sql") {
+      throw new Error(`ClickHouse only supports SQL queries, got "${options.query.language}"`);
+    }
     const chunkSize = options.chunkSize ?? 500;
-    const sql = options.sql.trim().replace(/;\s*$/, "") + " FORMAT JSONEachRow";
+    const sql = options.query.sql.trim().replace(/;\s*$/, "") + " FORMAT JSONEachRow";
     const res = await fetch(`${this.baseUrl}/?database=${encodeURIComponent(this.database)}`, {
       method: "POST",
       body: sql,
@@ -269,9 +273,12 @@ class ClickHouseConnection implements DriverConnection {
     if (batch.length) yield { rows: batch, nextCursor: null, columns: [] };
   }
 
-  async execute(sql: string): Promise<QueryExecResult> {
+  async execute(query: ExecSpec): Promise<QueryExecResult> {
+    if (query.language !== "sql") {
+      throw new Error(`ClickHouse only supports SQL queries, got "${query.language}"`);
+    }
     const start = performance.now();
-    const trimmed = sql.trim();
+    const trimmed = query.sql.trim();
     const isSelect = /^\s*(select|show|describe|desc)\b/i.test(trimmed);
     if (isSelect) {
       const result = await this.httpQuery(trimmed.replace(/;\s*$/, "") + " FORMAT JSON");
@@ -333,7 +340,7 @@ class ClickHouseConnection implements DriverConnection {
 export const clickhouseDriver: DatabaseDriver = {
   key: "clickhouse",
   displayName: "ClickHouse",
-  capabilities: { transactions: false, schemas: true, streaming: true, cancellation: true },
+  capabilities: { transactions: false, schemas: true, streaming: true, cancellation: true, queryLanguage: "sql" },
 
   async testConnection(config: ConnectionConfig) {
     const baseUrl = `http://${config.host ?? "localhost"}:${config.port ?? 8123}`;

@@ -60,8 +60,17 @@ export function DashboardsPage() {
             {dashboards.map((d) => (
               <div
                 key={d.id}
-                className="group flex cursor-pointer flex-col rounded-lg border border-border bg-card p-3 hover:border-accent"
+                role="button"
+                tabIndex={0}
+                aria-label={`Open dashboard "${d.title}"`}
+                className="group flex cursor-pointer flex-col rounded-lg border border-border bg-card p-3 hover:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => setOpenId(d.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setOpenId(d.id);
+                  }
+                }}
               >
                 <div className="flex items-start justify-between">
                   <span className="text-sm font-medium">{d.title}</span>
@@ -70,7 +79,8 @@ export function DashboardsPage() {
                       e.stopPropagation();
                       deleteMutation.mutate(d.id);
                     }}
-                    className="text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100"
+                    aria-label={`Delete dashboard "${d.title}"`}
+                    className="text-muted-foreground opacity-0 hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
                   >
                     <Trash2 size={14} />
                   </button>

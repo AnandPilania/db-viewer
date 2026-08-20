@@ -19,8 +19,15 @@ export function ConnectionSwitcher({ activeConnectionId, onSwitch, onAddNew }: P
     const onClick = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
     document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKeyDown);
+    };
   }, []);
 
   const active = connections?.find((c) => c.id === activeConnectionId);
@@ -29,6 +36,9 @@ export function ConnectionSwitcher({ activeConnectionId, onSwitch, onAddNew }: P
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Active connection: ${active?.database || active?.filePath || active?.host || "none"}. Click to switch.`}
         className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
       >
         <Plug size={12} className="text-accent" />
@@ -37,10 +47,12 @@ export function ConnectionSwitcher({ activeConnectionId, onSwitch, onAddNew }: P
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-20 mt-1 w-64 rounded-md border border-border bg-card shadow-lg">
+        <div role="menu" className="absolute left-0 top-full z-20 mt-1 w-64 rounded-md border border-border bg-card shadow-lg">
           {connections?.map((c) => (
             <button
               key={c.id}
+              role="menuitemradio"
+              aria-checked={c.id === activeConnectionId}
               onClick={() => {
                 onSwitch(c.id);
                 setOpen(false);
@@ -58,6 +70,7 @@ export function ConnectionSwitcher({ activeConnectionId, onSwitch, onAddNew }: P
             </button>
           ))}
           <button
+            role="menuitem"
             onClick={() => {
               onAddNew();
               setOpen(false);

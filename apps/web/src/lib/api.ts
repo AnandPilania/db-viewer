@@ -1,8 +1,11 @@
 import type {
   ConnectionConfig,
+  ExecSpec,
   QueryExecResult,
   QueryFilter,
+  QueryLanguage,
   QueryRowsResult,
+  QuerySpec,
   RowCountEstimate,
   RowCountExact,
   SchemaSummary,
@@ -26,11 +29,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export interface DriverInfo {
   key: string;
   displayName: string;
-  capabilities: { transactions: boolean; schemas: boolean; streaming: boolean; cancellation: boolean };
+  capabilities: { transactions: boolean; schemas: boolean; streaming: boolean; cancellation: boolean; queryLanguage: QueryLanguage };
+}
+
+export interface UninstalledDriverInfo {
+  key: string;
+  packageName: string;
+  displayName: string;
+}
+
+export interface DriversResponse {
+  active: DriverInfo[];
+  notInstalled: UninstalledDriverInfo[];
 }
 
 export const api = {
-  listDrivers: () => request<DriverInfo[]>("/drivers"),
+  listDrivers: () => request<DriversResponse>("/drivers"),
 
   listConnections: () => request<ConnectionConfig[]>("/connections"),
 
@@ -63,8 +77,8 @@ export const api = {
   countExact: (id: string, table: string, schema?: string) =>
     request<RowCountExact>(`/connections/${id}/tables/${table}/count/exact${schema ? `?schema=${schema}` : ""}`),
 
-  execute: (id: string, sql: string, params?: unknown[]) =>
-    request<QueryExecResult>(`/connections/${id}/execute`, { method: "POST", body: JSON.stringify({ sql, params }) }),
+  execute: (id: string, query: ExecSpec) =>
+    request<QueryExecResult>(`/connections/${id}/execute`, { method: "POST", body: JSON.stringify({ query }) }),
 
   updateCell: (
     id: string,

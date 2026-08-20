@@ -5,6 +5,7 @@ import type {
   ConnectionConfig,
   DatabaseDriver,
   DriverConnection,
+  ExecSpec,
   QueryExecResult,
   QueryRowsOptions,
   QueryRowsResult,
@@ -176,12 +177,16 @@ class SqliteConnection implements DriverConnection {
   }
 
   async *streamQuery(options: StreamQueryOptions): AsyncIterableIterator<QueryRowsResult> {
+    if (options.query.language !== "sql") {
+      throw new Error(`SQLite only supports SQL queries, got "${options.query.language}"`);
+    }
+    const { sql, params = [] } = options.query;
     const chunkSize = options.chunkSize ?? 500;
-    const stmt = this.db.prepare(options.sql);
+    const stmt = this.db.prepare(sql);
     let batch: Record<string, unknown>[] = [];
     const columns: ColumnDefinition[] = [];
 
-    for (const row of stmt.iterate(...(options.params ?? []))) {
+    for (const row of stmt.iterate(...params)) {
       if (options.signal?.aborted) return;
       batch.push(row as Record<string, unknown>);
       if (batch.length >= chunkSize) {
@@ -192,7 +197,11 @@ class SqliteConnection implements DriverConnection {
     if (batch.length) yield { rows: batch, nextCursor: null, columns };
   }
 
-  async execute(sql: string, params: unknown[] = []): Promise<QueryExecResult> {
+  async execute(query: ExecSpec): Promise<QueryExecResult> {
+    if (query.language !== "sql") {
+      throw new Error(`SQLite only supports SQL queries, got "${query.language}"`);
+    }
+    const { sql, params = [] } = query;
     const start = performance.now();
     const isSelect = /^\s*(select|pragma)/i.test(sql);
     if (isSelect) {
@@ -245,7 +254,7 @@ class SqliteConnection implements DriverConnection {
 export const sqliteDriver: DatabaseDriver = {
   key: "sqlite",
   displayName: "SQLite",
-  capabilities: { transactions: true, schemas: false, streaming: true, cancellation: true },
+  capabilities: { transactions: true, schemas: false, streaming: true, cancellation: true, queryLanguage: "sql" },
 
   async testConnection(config: ConnectionConfig) {
     try {

@@ -1,11 +1,11 @@
 import Fastify from "fastify";
 import {
-    corsPlugin,
-    websocketPlugin,
-    rateLimitPlugin,
-    errorHandlerPlugin,
-    gracefulShutdownPlugin,
-    staticFrontendPlugin,
+  corsPlugin,
+  websocketPlugin,
+  rateLimitPlugin,
+  errorHandlerPlugin,
+  gracefulShutdownPlugin,
+  staticFrontendPlugin,
 } from "./plugins/index.js";
 import { connectionRoutes } from "./routes/connections.js";
 import { streamRoutes } from "./routes/stream.js";
@@ -14,8 +14,28 @@ import { widgetRoutes } from "./routes/widgets.js";
 import { dashboardRoutes } from "./routes/dashboards.js";
 import { watchRoutes } from "./routes/watch.js";
 import { publicWatchRoutes } from "./routes/public-watch.js";
+import { registry } from "./registry.js";
 
 const app = Fastify({ logger: true });
+
+await registry.discover();
+const active = registry.list();
+const missing = registry.listUnavailable();
+if (active.length === 0) {
+  app.log.warn(
+    "No database drivers are installed. Install at least one, e.g.:\n" +
+      "  npm install @db-viewer/driver-postgres"
+  );
+} else {
+  app.log.info(`Drivers available: ${active.map((d) => d.key).join(", ")}`);
+}
+if (missing.length > 0) {
+  app.log.info(
+    `Drivers not installed (npm install @db-viewer/driver-<name> to enable): ${missing
+      .map((d) => d.key)
+      .join(", ")}`
+  );
+}
 
 await app.register(errorHandlerPlugin);
 await app.register(gracefulShutdownPlugin);
@@ -40,6 +60,6 @@ await app.register(staticFrontendPlugin);
 
 const port = Number(process.env.PORT ?? 4000);
 app.listen({ port, host: "0.0.0.0" }).catch((err) => {
-    app.log.error(err);
-    process.exit(1);
+  app.log.error(err);
+  process.exit(1);
 });

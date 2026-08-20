@@ -1,10 +1,14 @@
 import type { FastifyInstance } from "fastify";
+import type { ExecSpec } from "@db-viewer/driver-interface";
 import { connectionStore } from "../connection-store.js";
 import { registry } from "../registry.js";
 import { tableEvents } from "../table-events.js";
 
 export async function connectionRoutes(app: FastifyInstance) {
-  app.get("/api/drivers", async () => registry.list());
+  app.get("/api/drivers", async () => ({
+    active: registry.list(),
+    notInstalled: registry.listUnavailable(),
+  }));
 
   app.get("/api/connections", async () => connectionStore.list());
 
@@ -111,12 +115,16 @@ export async function connectionRoutes(app: FastifyInstance) {
 
   app.post("/api/connections/:id/execute", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const { sql, params } = req.body as { sql: string; params?: unknown[] };
+    const { query } = req.body as { query: ExecSpec };
     const controller = new AbortController();
     reply.raw.on("close", () => { if (!reply.raw.writableEnded) controller.abort(); });
+    if (!query || typeof query.language !== "string") {
+      reply.code(400);
+      return { error: 'Missing or invalid "query" in request body' };
+    }
     try {
       const conn = await connectionStore.getLive(id);
-      return await conn.execute(sql, params, controller.signal);
+      return await conn.execute(query, controller.signal);
     } catch (err) {
       reply.code(400);
       return { error: (err as Error).message };
