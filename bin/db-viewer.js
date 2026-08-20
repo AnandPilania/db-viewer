@@ -35,10 +35,28 @@ const KNOWN_DRIVERS = {
     clickhouse: "@db-viewer/driver-clickhouse",
 };
 
+/**
+ * On Windows, npm is installed as a .cmd shim, not a raw .exe — and
+ * Node's child_process (spawn/spawnSync) will NOT find it by bare name
+ * ("npm") the way a shell would; that resolution only happens when a
+ * shell does the PATH lookup. Without this, "npm install <driver>" fails
+ * with ENOENT on Windows even though typing the same command into a
+ * terminal works fine. See https://github.com/nodejs/node/issues/52681.
+ */
+function cmdFor(cmd) {
+    if (!isWindows) return cmd;
+    return ["npm", "pnpm", "yarn"].includes(cmd) ? `${cmd}.cmd` : cmd;
+}
+
 function runSync(cmd, args, cwd) {
-    const result = spawnSync(cmd, args, { cwd, stdio: "inherit", shell: isWindows });
+    const resolved = cmdFor(cmd);
+    const result = spawnSync(resolved, args, {
+        cwd,
+        stdio: "inherit",
+        shell: isWindows,
+    });
     if (result.error) {
-        console.error(`Failed to run ${cmd}: ${result.error.message}`);
+        console.error(`Failed to run ${resolved}: ${result.error.message}`);
         process.exit(1);
     }
     if (result.status !== 0) process.exit(result.status ?? 1);
@@ -130,7 +148,6 @@ function startPublished() {
     const server = spawn(process.execPath, [serverEntry], {
         cwd: packageRoot,
         stdio: "inherit",
-        shell: isWindows,
         env: { ...process.env, PORT: port, DB_VIEWER_HOME: driverHome },
     });
 
