@@ -8,7 +8,7 @@ importers:
 
   .:
     dependencies:
-      '@db-viewer/driver-interface':
+      '@pilaniaanand/driver-interface':
         specifier: workspace:*
         version: link:packages/driver-interface
       '@fastify/cors':
@@ -39,7 +39,7 @@ importers:
 
   apps/server:
     dependencies:
-      '@db-viewer/driver-interface':
+      '@pilaniaanand/driver-interface':
         specifier: workspace:*
         version: link:../../packages/driver-interface
       '@fastify/cors':
@@ -74,25 +74,25 @@ importers:
         specifier: ^5.6.3
         version: 5.9.3
     optionalDependencies:
-      '@db-viewer/driver-clickhouse':
+      '@pilaniaanand/driver-clickhouse':
         specifier: workspace:*
         version: link:../../packages/drivers/clickhouse
-      '@db-viewer/driver-mongodb':
+      '@pilaniaanand/driver-mongodb':
         specifier: workspace:*
         version: link:../../packages/drivers/mongodb
-      '@db-viewer/driver-mysql':
+      '@pilaniaanand/driver-mysql':
         specifier: workspace:*
         version: link:../../packages/drivers/mysql
-      '@db-viewer/driver-postgres':
+      '@pilaniaanand/driver-postgres':
         specifier: workspace:*
         version: link:../../packages/drivers/postgres
-      '@db-viewer/driver-redis':
+      '@pilaniaanand/driver-redis':
         specifier: workspace:*
         version: link:../../packages/drivers/redis
 
   apps/web:
     dependencies:
-      '@db-viewer/driver-interface':
+      '@pilaniaanand/driver-interface':
         specifier: workspace:*
         version: link:../../packages/driver-interface
       '@tanstack/react-query':
@@ -177,7 +177,7 @@ importers:
 
   packages/drivers/clickhouse:
     dependencies:
-      '@db-viewer/driver-interface':
+      '@pilaniaanand/driver-interface':
         specifier: workspace:*
         version: link:../../driver-interface
     devDependencies:
@@ -190,7 +190,7 @@ importers:
 
   packages/drivers/mongodb:
     dependencies:
-      '@db-viewer/driver-interface':
+      '@pilaniaanand/driver-interface':
         specifier: workspace:*
         version: link:../../driver-interface
       mongodb:
@@ -206,7 +206,7 @@ importers:
 
   packages/drivers/mysql:
     dependencies:
-      '@db-viewer/driver-interface':
+      '@pilaniaanand/driver-interface':
         specifier: workspace:*
         version: link:../../driver-interface
       mysql2:
@@ -222,7 +222,7 @@ importers:
 
   packages/drivers/postgres:
     dependencies:
-      '@db-viewer/driver-interface':
+      '@pilaniaanand/driver-interface':
         specifier: workspace:*
         version: link:../../driver-interface
       pg:
@@ -241,7 +241,7 @@ importers:
 
   packages/drivers/redis:
     dependencies:
-      '@db-viewer/driver-interface':
+      '@pilaniaanand/driver-interface':
         specifier: workspace:*
         version: link:../../driver-interface
       redis:

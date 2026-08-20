@@ -10,7 +10,7 @@
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {
-        "@db-viewer/driver-interface": "workspace:*",
+        "@pilaniaanand/driver-interface": "workspace:*",
         "@tanstack/react-query": "^5.62.7",
         "@tanstack/react-table": "^8.20.5",
         "@tanstack/react-virtual": "^3.10.9",

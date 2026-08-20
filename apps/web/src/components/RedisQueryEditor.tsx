@@ -1,5 +1,5 @@
 import { forwardRef, useImperativeHandle, useState } from "react";
-import type { QuerySpec, RedisKeyType } from "@db-viewer/driver-interface";
+import type { QuerySpec, RedisKeyType } from "@pilaniaanand/driver-interface";
 import type { QueryEditorHandle } from "@/components/MongoQueryEditor";
 
 const KEY_TYPES: RedisKeyType[] = ["string", "hash", "list", "set", "zset", "stream"];

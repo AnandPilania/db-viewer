@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { ColumnDefinition } from "@db-viewer/driver-interface";
+import type { ColumnDefinition } from "@pilaniaanand/driver-interface";
 import { validateValue, placeholderFor } from "@/lib/validation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";

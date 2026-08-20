@@ -2,7 +2,6 @@ packages:
   - "apps/*"
   - "packages/*"
   - "packages/drivers/*"
-  - "!packages/drivers/sqlite"
 
 allowBuilds:
   better-sqlite3: true

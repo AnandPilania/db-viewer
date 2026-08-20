@@ -1,23 +1,23 @@
-import type { DatabaseDriver } from "@db-viewer/driver-interface";
+import type { DatabaseDriver } from "@pilaniaanand/driver-interface";
 import { resolveInstalledDriver, driversDir } from "./driver-home.js";
 
 /**
  * Every driver db-viewer knows how to load, keyed by its registry key.
- * The npm package name follows a fixed convention: `@db-viewer/driver-<key>`.
+ * The npm package name follows a fixed convention: `@pilaniaanand/driver-<key>`.
  * None of these are imported here directly — see `discover()`.
  */
 const KNOWN_DRIVERS: Record<string, { packageName: string; exportName: string; displayName: string }> = {
-  sqlite: { packageName: "@db-viewer/driver-sqlite", exportName: "sqliteDriver", displayName: "SQLite" },
-  postgres: { packageName: "@db-viewer/driver-postgres", exportName: "postgresDriver", displayName: "PostgreSQL" },
-  mysql: { packageName: "@db-viewer/driver-mysql", exportName: "mysqlDriver", displayName: "MySQL" },
-  mongodb: { packageName: "@db-viewer/driver-mongodb", exportName: "mongodbDriver", displayName: "MongoDB" },
-  redis: { packageName: "@db-viewer/driver-redis", exportName: "redisDriver", displayName: "Redis" },
-  clickhouse: { packageName: "@db-viewer/driver-clickhouse", exportName: "clickhouseDriver", displayName: "ClickHouse" },
+    sqlite: { packageName: "@pilaniaanand/driver-sqlite", exportName: "sqliteDriver", displayName: "SQLite" },
+    postgres: { packageName: "@pilaniaanand/driver-postgres", exportName: "postgresDriver", displayName: "PostgreSQL" },
+    mysql: { packageName: "@pilaniaanand/driver-mysql", exportName: "mysqlDriver", displayName: "MySQL" },
+    mongodb: { packageName: "@pilaniaanand/driver-mongodb", exportName: "mongodbDriver", displayName: "MongoDB" },
+    redis: { packageName: "@pilaniaanand/driver-redis", exportName: "redisDriver", displayName: "Redis" },
+    clickhouse: { packageName: "@pilaniaanand/driver-clickhouse", exportName: "clickhouseDriver", displayName: "ClickHouse" },
 };
 
 /**
  * Adding a new database = write a package implementing DatabaseDriver,
- * publish it as `@db-viewer/driver-<key>`, and add one line to
+ * publish it as `@pilaniaanand/driver-<key>`, and add one line to
  * KNOWN_DRIVERS above. Nothing else in the server needs to change.
  *
  * Drivers are NOT static dependencies of this package. Each one is looked
@@ -42,103 +42,103 @@ const KNOWN_DRIVERS: Record<string, { packageName: string; exportName: string; d
  * have the driver as a real dependency) works without extra configuration.
  */
 class DriverRegistry {
-  private drivers = new Map<string, DatabaseDriver>();
-  private unavailable: string[] = [];
+    private drivers = new Map<string, DatabaseDriver>();
+    private unavailable: string[] = [];
 
-  register(driver: DatabaseDriver) {
-    this.drivers.set(driver.key, driver);
-  }
-
-  get(key: string): DatabaseDriver {
-    const driver = this.drivers.get(key);
-    if (!driver) {
-      const known = KNOWN_DRIVERS[key];
-      if (known && this.unavailable.includes(key)) {
-        throw new Error(`The "${key}" driver isn't installed. Run: db-viewer driver add ${key}`);
-      }
-      throw new Error(`No driver registered for "${key}". Available: ${[...this.drivers.keys()].join(", ")}`);
+    register(driver: DatabaseDriver) {
+        this.drivers.set(driver.key, driver);
     }
-    return driver;
-  }
 
-  list(): Array<{ key: string; displayName: string; capabilities: DatabaseDriver["capabilities"] }> {
-    return [...this.drivers.values()].map((d) => ({ key: d.key, displayName: d.displayName, capabilities: d.capabilities }));
-  }
-
-  /** Drivers whose package name is known but couldn't be resolved via either strategy above. */
-  listUnavailable(): Array<{ key: string; packageName: string; displayName: string }> {
-    return this.unavailable.map((key) => ({ key, ...KNOWN_DRIVERS[key] }));
-  }
-
-  /**
-   * Attempts to load every known driver package. Call once at startup
-   * before the server starts accepting requests. Safe to call multiple
-   * times (re-discovers from scratch each time — used after `driver
-   * add`/`driver remove` too, so a running dev server can pick up changes
-   * without a restart).
-   */
-  async discover(): Promise<void> {
-    this.drivers.clear();
-    this.unavailable = [];
-
-    for (const [key, meta] of Object.entries(KNOWN_DRIVERS)) {
-      const attempts: Array<{ label: string; load: () => Promise<any> }> = [
-        { label: "node_modules", load: () => import(/* @vite-ignore */ meta.packageName) },
-        {
-          label: "driversDir",
-          load: async () => {
-            const entryUrl = await resolveInstalledDriver(meta.packageName);
-            if (!entryUrl) {
-              const err: any = new Error(`Cannot find package '${meta.packageName}' under driversDir()`);
-              err.code = "ERR_MODULE_NOT_FOUND";
-              throw err;
+    get(key: string): DatabaseDriver {
+        const driver = this.drivers.get(key);
+        if (!driver) {
+            const known = KNOWN_DRIVERS[key];
+            if (known && this.unavailable.includes(key)) {
+                throw new Error(`The "${key}" driver isn't installed. Run: db-viewer driver add ${key}`);
             }
-            return import(/* @vite-ignore */ entryUrl);
-          },
-        },
-      ];
-
-      let lastError: any = null;
-      let loaded = false;
-
-      for (const attempt of attempts) {
-        try {
-          const mod: any = await attempt.load();
-          const driver = mod[meta.exportName] as DatabaseDriver | undefined;
-          if (!driver) {
-            throw new Error(`${meta.packageName} did not export "${meta.exportName}" (found: ${Object.keys(mod).join(", ") || "nothing"})`);
-          }
-          this.register(driver);
-          loaded = true;
-          break;
-        } catch (err: any) {
-          lastError = err;
-          const notFound =
-            (err?.code === "ERR_MODULE_NOT_FOUND" || err?.code === "MODULE_NOT_FOUND") &&
-            String(err?.message ?? "").includes(meta.packageName);
-          if (!notFound) {
-            // Found the package via this strategy but loading it still
-            // failed — unbuilt dist/, a missing native binding, a broken
-            // dependency inside the driver itself, etc. That's a real bug,
-            // not a "try the next strategy" situation, so stop here and
-            // report it loudly rather than silently falling through.
-            break;
-          }
-          // else: not found via this strategy, fall through to the next one
+            throw new Error(`No driver registered for "${key}". Available: ${[...this.drivers.keys()].join(", ")}`);
         }
-      }
-
-      if (!loaded) {
-        const notFoundEverywhere =
-          (lastError?.code === "ERR_MODULE_NOT_FOUND" || lastError?.code === "MODULE_NOT_FOUND") &&
-          String(lastError?.message ?? "").includes(meta.packageName);
-        if (!notFoundEverywhere) {
-          console.error(`[db-viewer] Driver "${key}" (${meta.packageName}) failed to load:\n${lastError?.stack ?? lastError?.message ?? lastError}`);
-        }
-        this.unavailable.push(key);
-      }
+        return driver;
     }
-  }
+
+    list(): Array<{ key: string; displayName: string; capabilities: DatabaseDriver["capabilities"] }> {
+        return [...this.drivers.values()].map((d) => ({ key: d.key, displayName: d.displayName, capabilities: d.capabilities }));
+    }
+
+    /** Drivers whose package name is known but couldn't be resolved via either strategy above. */
+    listUnavailable(): Array<{ key: string; packageName: string; displayName: string }> {
+        return this.unavailable.map((key) => ({ key, ...KNOWN_DRIVERS[key] }));
+    }
+
+    /**
+     * Attempts to load every known driver package. Call once at startup
+     * before the server starts accepting requests. Safe to call multiple
+     * times (re-discovers from scratch each time — used after `driver
+     * add`/`driver remove` too, so a running dev server can pick up changes
+     * without a restart).
+     */
+    async discover(): Promise<void> {
+        this.drivers.clear();
+        this.unavailable = [];
+
+        for (const [key, meta] of Object.entries(KNOWN_DRIVERS)) {
+            const attempts: Array<{ label: string; load: () => Promise<any> }> = [
+                { label: "node_modules", load: () => import(/* @vite-ignore */ meta.packageName) },
+                {
+                    label: "driversDir",
+                    load: async () => {
+                        const entryUrl = await resolveInstalledDriver(meta.packageName);
+                        if (!entryUrl) {
+                            const err: any = new Error(`Cannot find package '${meta.packageName}' under driversDir()`);
+                            err.code = "ERR_MODULE_NOT_FOUND";
+                            throw err;
+                        }
+                        return import(/* @vite-ignore */ entryUrl);
+                    },
+                },
+            ];
+
+            let lastError: any = null;
+            let loaded = false;
+
+            for (const attempt of attempts) {
+                try {
+                    const mod: any = await attempt.load();
+                    const driver = mod[meta.exportName] as DatabaseDriver | undefined;
+                    if (!driver) {
+                        throw new Error(`${meta.packageName} did not export "${meta.exportName}" (found: ${Object.keys(mod).join(", ") || "nothing"})`);
+                    }
+                    this.register(driver);
+                    loaded = true;
+                    break;
+                } catch (err: any) {
+                    lastError = err;
+                    const notFound =
+                        (err?.code === "ERR_MODULE_NOT_FOUND" || err?.code === "MODULE_NOT_FOUND") &&
+                        String(err?.message ?? "").includes(meta.packageName);
+                    if (!notFound) {
+                        // Found the package via this strategy but loading it still
+                        // failed — unbuilt dist/, a missing native binding, a broken
+                        // dependency inside the driver itself, etc. That's a real bug,
+                        // not a "try the next strategy" situation, so stop here and
+                        // report it loudly rather than silently falling through.
+                        break;
+                    }
+                    // else: not found via this strategy, fall through to the next one
+                }
+            }
+
+            if (!loaded) {
+                const notFoundEverywhere =
+                    (lastError?.code === "ERR_MODULE_NOT_FOUND" || lastError?.code === "MODULE_NOT_FOUND") &&
+                    String(lastError?.message ?? "").includes(meta.packageName);
+                if (!notFoundEverywhere) {
+                    console.error(`[db-viewer] Driver "${key}" (${meta.packageName}) failed to load:\n${lastError?.stack ?? lastError?.message ?? lastError}`);
+                }
+                this.unavailable.push(key);
+            }
+        }
+    }
 }
 
 export const registry = new DriverRegistry();

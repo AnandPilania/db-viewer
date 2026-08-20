@@ -1,6 +1,6 @@
 {
-    "name": "@db-viewer/driver-interface",
-    "version": "0.3.2",
+    "name": "@pilaniaanand/driver-interface",
+    "version": "0.4.0",
     "type": "module",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",

@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
 import "monaco-editor/esm/vs/basic-languages/sql/sql.contribution";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import type { TableDefinition } from "@db-viewer/driver-interface";
+import type { TableDefinition } from "@pilaniaanand/driver-interface";
 
 // Vite + monaco-editor recipe: bundle the editor's web workers locally
 // instead of pulling them from a CDN, so this works fully offline. We only

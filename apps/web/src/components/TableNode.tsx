@@ -1,6 +1,6 @@
 import { Handle, Position } from "reactflow";
 import { KeyRound, Link2 } from "lucide-react";
-import type { TableDefinition } from "@db-viewer/driver-interface";
+import type { TableDefinition } from "@pilaniaanand/driver-interface";
 
 export function TableNode({ data }: { data: TableDefinition }) {
   return (

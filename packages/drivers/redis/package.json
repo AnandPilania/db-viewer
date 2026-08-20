@@ -1,6 +1,6 @@
 {
-    "name": "@db-viewer/driver-redis",
-    "version": "0.3.2",
+    "name": "@pilaniaanand/driver-redis",
+    "version": "0.4.0",
     "type": "module",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
@@ -9,7 +9,7 @@
         "build": "tsc -p tsconfig.json"
     },
     "dependencies": {
-        "@db-viewer/driver-interface": "workspace:*",
+        "@pilaniaanand/driver-interface": "workspace:*",
         "redis": "^4.7.0"
     },
     "devDependencies": {

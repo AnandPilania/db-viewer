@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Hash, Download, Plus, Radio } from "lucide-react";
-import type { ColumnDefinition } from "@db-viewer/driver-interface";
+import type { ColumnDefinition } from "@pilaniaanand/driver-interface";
 import { api } from "@/lib/api";
 import { useTableRows } from "@/hooks/useTableRows";
 import { useTableRealtime } from "@/hooks/useTableRealtime";

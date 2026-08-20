@@ -157,7 +157,7 @@ isn't implemented yet.
 ## Adding a new database driver
 
 1. `packages/drivers/<name>/` — new package implementing `DatabaseDriver` from
-   `@db-viewer/driver-interface`.
+   `@pilaniaanand/driver-interface`.
 2. Register it in `apps/server/src/registry.ts` — one line.
 
 Nothing else changes. The server, the connection store, and every frontend

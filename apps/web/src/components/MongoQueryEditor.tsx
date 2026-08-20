@@ -1,5 +1,5 @@
 import { forwardRef, useImperativeHandle, useState } from "react";
-import type { QuerySpec, TableDefinition } from "@db-viewer/driver-interface";
+import type { QuerySpec, TableDefinition } from "@pilaniaanand/driver-interface";
 
 export interface QueryEditorHandle {
   run(): void;

@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { connectionStore } from "./connection-store.js";
-import type { RowChangeEvent } from "@db-viewer/driver-interface";
+import type { RowChangeEvent } from "@pilaniaanand/driver-interface";
 
 export type TableChangeEvent = RowChangeEvent;
 
@@ -18,19 +18,19 @@ export type TableChangeEvent = RowChangeEvent;
  * need binlog replication), so they only see app-originated changes.
  */
 class TableEventBus extends EventEmitter {
-  private key(connectionId: string, table: string): string {
-    return `${connectionId}::${table}`;
-  }
+    private key(connectionId: string, table: string): string {
+        return `${connectionId}::${table}`;
+    }
 
-  publish(connectionId: string, table: string, event: TableChangeEvent) {
-    this.emit(this.key(connectionId, table), event);
-  }
+    publish(connectionId: string, table: string, event: TableChangeEvent) {
+        this.emit(this.key(connectionId, table), event);
+    }
 
-  subscribe(connectionId: string, table: string, handler: (event: TableChangeEvent) => void): () => void {
-    const key = this.key(connectionId, table);
-    this.on(key, handler);
-    return () => this.off(key, handler);
-  }
+    subscribe(connectionId: string, table: string, handler: (event: TableChangeEvent) => void): () => void {
+        const key = this.key(connectionId, table);
+        this.on(key, handler);
+        return () => this.off(key, handler);
+    }
 }
 
 export const tableEvents = new TableEventBus();
@@ -42,31 +42,31 @@ tableEvents.setMaxListeners(0); // unbounded — many browser tabs may watch the
 const nativeWatchers = new Map<string, { count: number; stop: () => void }>();
 
 export async function ensureNativeWatch(connectionId: string, table: string): Promise<void> {
-  const key = `${connectionId}::${table}`;
-  const existing = nativeWatchers.get(key);
-  if (existing) {
-    existing.count++;
-    return;
-  }
-  try {
-    const conn = await connectionStore.getLive(connectionId);
-    if (!conn.watchTable) return; // driver doesn't support native watching
-    const stop = conn.watchTable(table, undefined, (event) => {
-      tableEvents.publish(connectionId, table, event);
-    });
-    nativeWatchers.set(key, { count: 1, stop });
-  } catch {
-    // Connection not available yet — app-originated events still work via tableEvents.
-  }
+    const key = `${connectionId}::${table}`;
+    const existing = nativeWatchers.get(key);
+    if (existing) {
+        existing.count++;
+        return;
+    }
+    try {
+        const conn = await connectionStore.getLive(connectionId);
+        if (!conn.watchTable) return; // driver doesn't support native watching
+        const stop = conn.watchTable(table, undefined, (event) => {
+            tableEvents.publish(connectionId, table, event);
+        });
+        nativeWatchers.set(key, { count: 1, stop });
+    } catch {
+        // Connection not available yet — app-originated events still work via tableEvents.
+    }
 }
 
 export function releaseNativeWatch(connectionId: string, table: string): void {
-  const key = `${connectionId}::${table}`;
-  const existing = nativeWatchers.get(key);
-  if (!existing) return;
-  existing.count--;
-  if (existing.count <= 0) {
-    existing.stop();
-    nativeWatchers.delete(key);
-  }
+    const key = `${connectionId}::${table}`;
+    const existing = nativeWatchers.get(key);
+    if (!existing) return;
+    existing.count--;
+    if (existing.count <= 0) {
+        existing.stop();
+        nativeWatchers.delete(key);
+    }
 }

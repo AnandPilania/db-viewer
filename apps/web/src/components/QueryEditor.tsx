@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Play, Square, Download } from "lucide-react";
-import type { QuerySpec } from "@db-viewer/driver-interface";
+import type { QuerySpec } from "@pilaniaanand/driver-interface";
 import { api } from "@/lib/api";
 import { useStreamingQuery } from "@/hooks/useStreamingQuery";
 import { Button } from "@/components/ui/button";

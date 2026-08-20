@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table";
-import type { ColumnDefinition } from "@db-viewer/driver-interface";
+import type { ColumnDefinition } from "@pilaniaanand/driver-interface";
 import { Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { validateValue, placeholderFor } from "@/lib/validation";
