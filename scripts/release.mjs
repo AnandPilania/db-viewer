@@ -54,9 +54,21 @@ function sh(cmd, args, opts = {}) {
     return execFileSync(cmdFor(cmd), args, { cwd: root, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], ...opts });
 }
 
+/** Runs cmd, returns { ok, reason } — reason is set (and ok is false) whether the command
+ *  couldn't be spawned at all (ENOENT — usually a PATH/shim resolution problem) or ran and
+ *  exited non-zero. Collapsing both into a plain boolean is what made the original version
+ *  of this check impossible to debug: "pnpm not found" and "pnpm ran and failed" looked
+ *  identical from the caller's side. */
 function shOk(cmd, args, opts = {}) {
-    const result = spawnSync(cmdFor(cmd), args, { cwd: root, encoding: "utf8", ...opts });
-    return result.status === 0;
+    const resolved = cmdFor(cmd);
+    const result = spawnSync(resolved, args, { cwd: root, encoding: "utf8", ...opts });
+    if (result.error) {
+        return { ok: false, reason: `couldn't run "${resolved}" (${result.error.code ?? result.error.message})` };
+    }
+    if (result.status !== 0) {
+        return { ok: false, reason: (result.stderr || result.stdout || `exited with code ${result.status}`).trim() };
+    }
+    return { ok: true, reason: null };
 }
 
 /**
@@ -111,8 +123,15 @@ function isAlreadyPublished(name, version) {
 }
 
 function currentNpmUser() {
-    const result = spawnSync(cmdFor("npm"), ["whoami"], { cwd: root, encoding: "utf8" });
-    return result.status === 0 ? result.stdout.trim() : null;
+    const resolved = cmdFor("npm");
+    const result = spawnSync(resolved, ["whoami"], { cwd: root, encoding: "utf8" });
+    if (result.error) {
+        return { user: null, reason: `couldn't run "${resolved}" (${result.error.code ?? result.error.message})` };
+    }
+    if (result.status !== 0) {
+        return { user: null, reason: (result.stderr || result.stdout || `exited with code ${result.status}`).trim() };
+    }
+    return { user: result.stdout.trim(), reason: null };
 }
 
 function preflight({ dryRun }) {
@@ -138,9 +157,9 @@ function preflight({ dryRun }) {
     }
 
     if (!dryRun) {
-        const user = currentNpmUser();
+        const { user, reason } = currentNpmUser();
         if (!user) {
-            problems.push('Not logged into npm — run "npm login" first.');
+            problems.push(`Not logged into npm, or npm couldn't be run — ${reason}. Run "npm login" and verify "npm whoami" works in this same terminal.`);
         } else {
             console.log(`npm user: ${user}`);
         }
@@ -150,8 +169,12 @@ function preflight({ dryRun }) {
         problems.push("Doesn't look like the repo root (no pnpm-workspace.yaml found).");
     }
 
-    if (!shOk("pnpm", ["--version"])) {
-        problems.push('pnpm is not on PATH — this script publishes via "pnpm publish" so workspace:* ranges get rewritten correctly.');
+    const pnpmCheck = shOk("pnpm", ["--version"]);
+    if (!pnpmCheck.ok) {
+        problems.push(
+            `pnpm isn't runnable as "${cmdFor("pnpm")}" — ${pnpmCheck.reason}. This script publishes via "pnpm publish" ` +
+            `so workspace:* ranges get rewritten correctly; verify "${cmdFor("pnpm")} --version" works in this same terminal.`
+        );
     }
 
     return problems;
