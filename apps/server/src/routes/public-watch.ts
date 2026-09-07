@@ -26,33 +26,40 @@ export async function publicWatchRoutes(app: FastifyInstance) {
       socket.close(1008, auth.error);
       return;
     }
-    const dashboard = dashboardStore.get(id);
+
+    let dashboard, widget;
+    try {
+      dashboard = dashboardStore.get(id);
+      widget = widgetStore.get(widgetId);
+    } catch {
+      socket.close(1008, "Dashboard or widget not found");
+      return;
+    }
     if (!dashboard.layout.some((item) => item.widgetId === widgetId)) {
       socket.close(1008, "Widget is not on this dashboard");
       return;
     }
 
-    let widget;
     try {
-      widget = widgetStore.get(widgetId);
-    } catch {
-      socket.close(1008, "Widget not found");
-      return;
+      await ensureNativeWatch(widget.connectionId, widget.table);
+
+      const unsubscribe = tableEvents.subscribe(widget.connectionId, widget.table, () => {
+        try {
+          if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({ type: "changed" }));
+        } catch (err) {
+          app.log.error({ err, widgetId }, "Failed to send public-watch ping");
+        }
+      });
+
+      const cleanup = () => {
+        unsubscribe();
+        releaseNativeWatch(widget.connectionId, widget.table);
+      };
+      socket.on("close", cleanup);
+      socket.on("error", cleanup);
+    } catch (err) {
+      app.log.error({ err, widgetId }, "Failed to set up public table watch");
+      socket.close(1011, "Failed to set up table watch");
     }
-
-    await ensureNativeWatch(widget.connectionId, widget.table);
-
-    const unsubscribe = tableEvents.subscribe(widget.connectionId, widget.table, () => {
-      if (socket.readyState === socket.OPEN) {
-        socket.send(JSON.stringify({ type: "changed" }));
-      }
-    });
-
-    const cleanup = () => {
-      unsubscribe();
-      releaseNativeWatch(widget.connectionId, widget.table);
-    };
-    socket.on("close", cleanup);
-    socket.on("error", cleanup);
   });
 }

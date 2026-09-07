@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { connectionStore } from "./connection-store.js";
+import { logger } from "./logger.js";
 import type { RowChangeEvent } from "@pilaniaanand/driver-interface";
 
 export type TableChangeEvent = RowChangeEvent;
@@ -10,12 +11,12 @@ export type TableChangeEvent = RowChangeEvent;
  * what makes the UI update instantly across tabs/users when someone edits
  * data through the app itself.
  *
- * For drivers whose database supports it without heavy setup, `ensureNativeWatch`
- * below also feeds real change-data-capture into this same bus — Postgres
- * (auto-installed trigger + LISTEN/NOTIFY), Redis (keyspace notifications),
- * and MongoDB (Change Streams) all pick up writes made *outside* the app
- * too. MySQL and ClickHouse have no equivalent low-effort mechanism (would
- * need binlog replication), so they only see app-originated changes.
+ * `ensureNativeWatch` below also feeds each driver's own change detection
+ * into this same bus, so writes made *outside* the app are picked up too:
+ * Postgres (auto-installed trigger + LISTEN/NOTIFY), Redis (keyspace
+ * notifications), MongoDB (Change Streams), and SQLite/MySQL/ClickHouse
+ * (poll-and-diff — none of the three have a low-effort native push
+ * mechanism, so they re-check the table on an interval instead).
  */
 class TableEventBus extends EventEmitter {
     private key(connectionId: string, table: string): string {
@@ -52,11 +53,16 @@ export async function ensureNativeWatch(connectionId: string, table: string): Pr
         const conn = await connectionStore.getLive(connectionId);
         if (!conn.watchTable) return; // driver doesn't support native watching
         const stop = conn.watchTable(table, undefined, (event) => {
-            tableEvents.publish(connectionId, table, event);
+            try {
+                tableEvents.publish(connectionId, table, event);
+            } catch (err) {
+                logger.error({ err, connectionId, table }, "Native-watch callback failed");
+            }
         });
         nativeWatchers.set(key, { count: 1, stop });
-    } catch {
+    } catch (err) {
         // Connection not available yet — app-originated events still work via tableEvents.
+        logger.warn({ err, connectionId, table }, "Could not start native table watch");
     }
 }
 

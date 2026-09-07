@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table";
+import { flexRender } from "@tanstack/react-table";
+// react-table v9's default API (`useTable`) is a full rewrite around pluggable
+// "features" — `/legacy` is the officially shipped v8-compatible surface for
+// exactly this usage (core row model only, no sorting/filtering/pagination).
+import { getCoreRowModel, useLegacyTable, type LegacyColumnDef } from "@tanstack/react-table/legacy";
 import type { ColumnDefinition } from "@pilaniaanand/driver-interface";
 import { Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -37,7 +41,7 @@ export function DataGrid({ columns, rows, loading, hasMore, onNeedMore, onEditCe
     setEditing({ rowIndex, column: col.name });
   }
 
-  const tableColumns: ColumnDef<Record<string, unknown>>[] = columns.map((col, colIndex) => ({
+  const tableColumns: LegacyColumnDef<Record<string, unknown>>[] = columns.map((col, colIndex) => ({
     accessorKey: col.name,
     header: col.name,
     cell: (info) => {
@@ -98,7 +102,7 @@ export function DataGrid({ columns, rows, loading, hasMore, onNeedMore, onEditCe
     },
   }));
 
-  const table = useReactTable({
+  const table = useLegacyTable({
     data: rows,
     columns: tableColumns,
     getCoreRowModel: getCoreRowModel(),
@@ -265,12 +269,18 @@ export function DataGrid({ columns, rows, loading, hasMore, onNeedMore, onEditCe
           </tbody>
         </table>
         {loading && (
-          <div role="status" className="px-3 py-2 text-xs text-muted-foreground">
+          // sticky, not static — more rows are fetched proactively (see
+          // FETCH_THRESHOLD_PX) while the user is still short of the actual
+          // bottom of the table, so a normal in-flow indicator would render
+          // off-screen below their current scroll position every time.
+          <div role="status" className="sticky bottom-0 border-t border-border bg-card px-3 py-2 text-xs text-muted-foreground">
             Loading more rows…
           </div>
         )}
         {!hasMore && rows.length > 0 && (
-          <div className="px-3 py-2 text-xs text-muted-foreground">End of table — {rows.length.toLocaleString()} rows loaded.</div>
+          <div className="sticky bottom-0 border-t border-border bg-card px-3 py-2 text-xs text-muted-foreground">
+            End of table — {rows.length.toLocaleString()} rows loaded.
+          </div>
         )}
       </div>
     </div>

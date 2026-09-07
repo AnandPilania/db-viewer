@@ -14,19 +14,26 @@ export async function watchRoutes(app: FastifyInstance) {
   app.get("/ws/connections/:id/tables/:table/watch", { websocket: true }, async (socket, req) => {
     const { id, table } = req.params as { id: string; table: string };
 
-    await ensureNativeWatch(id, table);
+    try {
+      await ensureNativeWatch(id, table);
 
-    const unsubscribe = tableEvents.subscribe(id, table, (event) => {
-      if (socket.readyState === socket.OPEN) {
-        socket.send(JSON.stringify(event));
-      }
-    });
+      const unsubscribe = tableEvents.subscribe(id, table, (event) => {
+        try {
+          if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(event));
+        } catch (err) {
+          app.log.error({ err, connectionId: id, table }, "Failed to send table-watch event");
+        }
+      });
 
-    const cleanup = () => {
-      unsubscribe();
-      releaseNativeWatch(id, table);
-    };
-    socket.on("close", cleanup);
-    socket.on("error", cleanup);
+      const cleanup = () => {
+        unsubscribe();
+        releaseNativeWatch(id, table);
+      };
+      socket.on("close", cleanup);
+      socket.on("error", cleanup);
+    } catch (err) {
+      app.log.error({ err, connectionId: id, table }, "Failed to set up table watch");
+      socket.close(1011, "Failed to set up table watch");
+    }
   });
 }

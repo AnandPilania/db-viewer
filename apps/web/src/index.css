@@ -1,6 +1,26 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme {
+  --color-border: hsl(240 4% 20%);
+  --color-input: hsl(240 4% 20%);
+  --color-ring: hsl(200 90% 55%);
+  --color-background: hsl(240 6% 8%);
+  --color-foreground: hsl(0 0% 95%);
+  --color-muted: hsl(240 4% 16%);
+  --color-muted-foreground: hsl(240 3% 65%);
+  --color-accent: hsl(200 90% 55%);
+  --color-accent-foreground: hsl(240 6% 8%);
+  --color-card: hsl(240 5% 11%);
+  --color-card-foreground: hsl(0 0% 95%);
+  --color-destructive: hsl(0 70% 55%);
+  --color-destructive-foreground: hsl(0 0% 98%);
+
+  --radius-lg: 8px;
+  --radius-md: 6px;
+  --radius-sm: 4px;
+
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 
 @layer base {
   * {

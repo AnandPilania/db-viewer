@@ -4,7 +4,7 @@
     "description": "Browse and query Postgres, MySQL, SQLite, MongoDB, Redis, and ClickHouse from one local web UI.",
     "type": "module",
     "engines": {
-        "node": ">=18"
+        "node": "^20.19.0 || >=22.12.0"
     },
     "bin": {
         "db-viewer": "./bin/db-viewer.js"
@@ -28,17 +28,17 @@
         "release": "node scripts/release.mjs"
     },
     "dependencies": {
+        "@fastify/cors": "^11.3.0",
+        "@fastify/rate-limit": "^11.2.0",
+        "@fastify/static": "^10.1.3",
+        "@fastify/websocket": "^11.3.0",
         "@pilaniaanand/driver-interface": "workspace:*",
-        "@fastify/cors": "^10.0.1",
-        "@fastify/rate-limit": "^10.2.1",
-        "@fastify/static": "^8.0.3",
-        "@fastify/websocket": "^11.0.1",
-        "fastify": "^5.1.0",
-        "fastify-plugin": "^5.0.1",
-        "nanoid": "^5.0.9"
+        "fastify": "^5.12.3",
+        "fastify-plugin": "^6.0.0",
+        "nanoid": "^6.0.1"
     },
     "devDependencies": {
-        "typescript": "^5.6.3"
+        "typescript": "^7.0.2"
     },
     "publishConfig": {
         "access": "public"

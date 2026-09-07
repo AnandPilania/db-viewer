@@ -27,6 +27,21 @@ export function SqlEditor({ value, onChange, tables, onRun }: Props) {
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const tablesRef = useRef(tables);
   tablesRef.current = tables;
+  // Same stale-closure hazard as tablesRef: the Ctrl+Enter action below is
+  // registered once at mount, so without this it would permanently call
+  // whichever `onRun` (and whatever `sql` state it closed over) existed on
+  // the very first render — forever running the initial placeholder query
+  // regardless of what's actually typed. The Run button doesn't have this
+  // problem since it's a fresh click handler bound on every render.
+  const onRunRef = useRef(onRun);
+  onRunRef.current = onRun;
+  // Tracks the last value *we* emitted via onChange, so the effect below can
+  // tell "value changed because the user typed" (skip — the editor already
+  // has this content) from "value changed externally" (apply it). Without
+  // this, every keystroke's own round-trip through parent state re-triggers
+  // editor.setValue() on the next render, which resets the cursor to the
+  // start and can clobber whatever the user typed in the meantime.
+  const lastEmittedRef = useRef(value);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -45,12 +60,16 @@ export function SqlEditor({ value, onChange, tables, onRun }: Props) {
     });
     editorRef.current = editor;
 
-    const changeSub = editor.onDidChangeModelContent(() => onChange(editor.getValue()));
+    const changeSub = editor.onDidChangeModelContent(() => {
+      const v = editor.getValue();
+      lastEmittedRef.current = v;
+      onChange(v);
+    });
     const runAction = editor.addAction({
       id: "run-query",
       label: "Run Query",
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
-      run: () => onRun?.(),
+      run: () => onRunRef.current?.(),
     });
 
     // Schema-aware completion: suggests table names anywhere, and column
@@ -132,10 +151,13 @@ export function SqlEditor({ value, onChange, tables, onRun }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Keep the editor's content in sync if `value` changes externally (e.g. reset).
+  // Keep the editor's content in sync if `value` changes externally (e.g. reset)
+  // — but not if this `value` is just the echo of our own last onChange, or
+  // typing would keep getting overwritten mid-edit (see lastEmittedRef above).
   useEffect(() => {
     const editor = editorRef.current;
-    if (editor && editor.getValue() !== value) {
+    if (editor && value !== lastEmittedRef.current) {
+      lastEmittedRef.current = value;
       editor.setValue(value);
     }
   }, [value]);

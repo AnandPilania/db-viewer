@@ -1,5 +1,6 @@
 import type { DatabaseDriver } from "@pilaniaanand/driver-interface";
 import { resolveInstalledDriver, driversDir } from "./driver-home.js";
+import { logger } from "./logger.js";
 
 /**
  * Every driver db-viewer knows how to load, keyed by its registry key.
@@ -133,7 +134,7 @@ class DriverRegistry {
                     (lastError?.code === "ERR_MODULE_NOT_FOUND" || lastError?.code === "MODULE_NOT_FOUND") &&
                     String(lastError?.message ?? "").includes(meta.packageName);
                 if (!notFoundEverywhere) {
-                    console.error(`[db-viewer] Driver "${key}" (${meta.packageName}) failed to load:\n${lastError?.stack ?? lastError?.message ?? lastError}`);
+                    logger.error({ err: lastError, driver: key, packageName: meta.packageName }, "Driver failed to load");
                 }
                 this.unavailable.push(key);
             }

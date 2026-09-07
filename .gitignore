@@ -7,3 +7,5 @@ build
 *.sqlite
 *.sqlite3
 .turbo
+*.lock
+.claude

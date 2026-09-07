@@ -1,19 +1,36 @@
-import type {
-    ColumnDefinition,
-    ColumnType,
-    ConnectionConfig,
-    DatabaseDriver,
-    DriverConnection,
-    ExecSpec,
-    QueryExecResult,
-    QueryRowsOptions,
-    QueryRowsResult,
-    RowCountEstimate,
-    RowCountExact,
-    SchemaSummary,
-    StreamQueryOptions,
-    TableDefinition,
+import {
+    diffTableSnapshots,
+    assertSafeIdentifier,
+    type ColumnDefinition,
+    type ColumnType,
+    type ConnectionConfig,
+    type DatabaseDriver,
+    type DriverConnection,
+    type ExecSpec,
+    type QueryExecResult,
+    type QueryRowsOptions,
+    type QueryRowsResult,
+    type RowChangeEvent,
+    type RowCountEstimate,
+    type RowCountExact,
+    type SchemaSummary,
+    type StreamQueryOptions,
+    type TableDefinition,
 } from "@pilaniaanand/driver-interface";
+
+// ClickHouse has no trigger/CDC mechanism at all (it's OLAP, not OLTP) —
+// poll-and-diff is the only option. UPDATE/DELETE are async mutations (see
+// class doc comment below), so changes from those may lag behind the poll
+// by more than one interval — that's ClickHouse's own behavior, not a bug
+// in this polling.
+const POLL_INTERVAL_MS = 2000;
+const WATCH_ROW_LIMIT = 1000;
+
+// Only these ever reach the "else" branch in queryRows below (is_null/
+// is_not_null/in/like are handled separately) — anything else is a request
+// body forged past the frontend's own TS types, since QueryFilter.op is a
+// closed union there but req.body is untyped on arrival at the server.
+const SAFE_COMPARISON_OPS = new Set(["=", "!=", ">", ">=", "<", "<="]);
 
 /**
  * ClickHouse has no official lightweight HTTP-only client that also
@@ -78,6 +95,7 @@ class ClickHouseConnection implements DriverConnection {
     readonly id: string;
     private baseUrl: string;
     private database: string;
+    private watchIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
     constructor(id: string, baseUrl: string, database: string) {
         this.id = id;
@@ -160,6 +178,8 @@ class ClickHouseConnection implements DriverConnection {
 
     async describeTable(table: string, schema?: string): Promise<TableDefinition> {
         const database = schema ?? this.database;
+        assertSafeIdentifier(database, "schema");
+        assertSafeIdentifier(table, "table");
         return { schema: database, name: table, kind: "table", columns: await this.describeColumns(database, table) };
     }
 
@@ -171,6 +191,11 @@ class ClickHouseConnection implements DriverConnection {
 
     async queryRows(options: QueryRowsOptions): Promise<QueryRowsResult> {
         const database = options.schema ?? this.database;
+        assertSafeIdentifier(database, "schema");
+        assertSafeIdentifier(options.table, "table");
+        for (const c of options.columns ?? []) assertSafeIdentifier(c, "column");
+        for (const f of options.filters ?? []) assertSafeIdentifier(f.column, "column");
+
         const pkCols = await this.primaryKeyColumns(database, options.table);
         const columns = await this.describeColumns(database, options.table);
         const selectCols = options.columns?.length ? options.columns.map((c) => `\`${c}\``).join(", ") : "*";
@@ -200,6 +225,7 @@ class ClickHouseConnection implements DriverConnection {
             else if (f.op === "in" && Array.isArray(f.value)) {
                 where.push(`\`${f.column}\` IN (${f.value.map((v) => toLiteral(v)).join(", ")})`);
             } else {
+                if (!SAFE_COMPARISON_OPS.has(f.op)) throw new Error(`Invalid filter operator: ${JSON.stringify(f.op)}`);
                 where.push(`\`${f.column}\` ${f.op} ${toLiteral(f.value)}`);
             }
         }
@@ -223,12 +249,16 @@ class ClickHouseConnection implements DriverConnection {
         // cheap (no full-row materialization needed) — cheap enough to use as
         // the "fast" estimate path here even though it's a real query.
         const database = schema ?? this.database;
+        assertSafeIdentifier(database, "schema");
+        assertSafeIdentifier(table, "table");
         const result = await this.httpQuery(`SELECT count() AS c FROM \`${database}\`.\`${table}\` FORMAT JSON`);
         return { value: Number(result.data[0]?.c ?? 0), exact: false, source: "statistics" };
     }
 
     async countRowsExact(table: string, schema?: string): Promise<RowCountExact> {
         const database = schema ?? this.database;
+        assertSafeIdentifier(database, "schema");
+        assertSafeIdentifier(table, "table");
         const result = await this.httpQuery(`SELECT count() AS c FROM \`${database}\`.\`${table}\` FORMAT JSON`);
         return { value: Number(result.data[0]?.c ?? 0), exact: true };
     }
@@ -301,7 +331,10 @@ class ClickHouseConnection implements DriverConnection {
         values: Record<string, unknown>
     ): Promise<Record<string, unknown>> {
         const database = schema ?? this.database;
+        assertSafeIdentifier(database, "schema");
+        assertSafeIdentifier(table, "table");
         const cols = Object.keys(values);
+        for (const c of cols) assertSafeIdentifier(c, "column");
         const colList = cols.map((c) => `\`${c}\``).join(", ");
         const valueList = cols.map((c) => toLiteral(values[c])).join(", ");
         await this.httpExecute(`INSERT INTO \`${database}\`.\`${table}\` (${colList}) VALUES (${valueList})`);
@@ -310,8 +343,11 @@ class ClickHouseConnection implements DriverConnection {
 
     async deleteRow(table: string, schema: string | undefined, primaryKey: Record<string, unknown>): Promise<void> {
         const database = schema ?? this.database;
+        assertSafeIdentifier(database, "schema");
+        assertSafeIdentifier(table, "table");
         const pkCols = Object.keys(primaryKey);
         if (pkCols.length === 0) throw new Error("deleteRow requires at least one primary key column");
+        for (const c of pkCols) assertSafeIdentifier(c, "column");
         const whereClause = pkCols.map((c) => `\`${c}\` = ${toLiteral(primaryKey[c])}`).join(" AND ");
         // ALTER ... DELETE is an async ClickHouse "mutation" — see class doc comment.
         await this.httpExecute(`ALTER TABLE \`${database}\`.\`${table}\` DELETE WHERE ${whereClause}`);
@@ -325,15 +361,54 @@ class ClickHouseConnection implements DriverConnection {
         value: unknown
     ): Promise<void> {
         const database = schema ?? this.database;
+        assertSafeIdentifier(database, "schema");
+        assertSafeIdentifier(table, "table");
+        assertSafeIdentifier(column, "column");
         const pkCols = Object.keys(primaryKey);
         if (pkCols.length === 0) throw new Error("updateCell requires at least one primary key column");
+        for (const c of pkCols) assertSafeIdentifier(c, "column");
         const whereClause = pkCols.map((c) => `\`${c}\` = ${toLiteral(primaryKey[c])}`).join(" AND ");
         // ALTER ... UPDATE is an async ClickHouse "mutation" — see class doc comment.
         await this.httpExecute(`ALTER TABLE \`${database}\`.\`${table}\` UPDATE \`${column}\` = ${toLiteral(value)} WHERE ${whereClause}`);
     }
 
+    watchTable(table: string, schema: string | undefined, onChange: (event: RowChangeEvent) => void): () => void {
+        const database = schema ?? this.database;
+        assertSafeIdentifier(database, "schema");
+        assertSafeIdentifier(table, "table");
+        let lastRows: Record<string, unknown>[] | null = null;
+        let stopped = false;
+
+        const poll = async () => {
+            const pkCols = await this.primaryKeyColumns(database, table);
+            const result = await this.httpQuery(
+                `SELECT * FROM \`${database}\`.\`${table}\` LIMIT ${WATCH_ROW_LIMIT} FORMAT JSON`
+            );
+            if (stopped) return;
+            if (lastRows) {
+                for (const event of diffTableSnapshots(lastRows, result.data, pkCols)) onChange(event);
+            }
+            lastRows = result.data; // first poll only establishes the baseline — nothing to diff against yet
+        };
+
+        const onPollError = (err: unknown) => console.error(`ClickHouse table-watch poll failed for "${table}":`, (err as Error).message);
+        void poll().catch(onPollError);
+        this.watchIntervals.set(
+            table,
+            setInterval(() => void poll().catch(onPollError), POLL_INTERVAL_MS)
+        );
+
+        return () => {
+            stopped = true;
+            const interval = this.watchIntervals.get(table);
+            if (interval) clearInterval(interval);
+            this.watchIntervals.delete(table);
+        };
+    }
+
     async close(): Promise<void> {
-        // Stateless HTTP interface — nothing to tear down.
+        for (const interval of this.watchIntervals.values()) clearInterval(interval);
+        this.watchIntervals.clear();
     }
 }
 

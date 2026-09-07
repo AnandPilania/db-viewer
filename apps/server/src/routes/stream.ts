@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
-import type { QuerySpec } from "@pilaniaanand/driver-interface";
+import { isDestructiveExec, type QuerySpec } from "@pilaniaanand/driver-interface";
 import { connectionStore } from "../connection-store.js";
+import { isReadOnlyConnection, ReadOnlyError } from "../read-only.js";
 
 /**
  * Client sends: { type: "run", query: QuerySpec }
@@ -42,6 +43,16 @@ export async function streamRoutes(app: FastifyInstance) {
                 controller = new AbortController();
                 const start = performance.now();
                 try {
+                    // streamQuery's "sql" shape can carry a write statement just as
+                    // easily as execute() can — same read-only gate applies. mongo/
+                    // redis-command QuerySpec here are find/scan-only shapes (no
+                    // write op field exists for them at this type), so only "sql"
+                    // needs the check.
+                    if (query.language === "sql" && isReadOnlyConnection(connectionStore.getConfig(id))) {
+                        if (isDestructiveExec({ language: "sql", sql: query.sql, params: query.params })) {
+                            throw new ReadOnlyError();
+                        }
+                    }
                     const conn = await connectionStore.getLive(id);
                     for await (const chunk of conn.streamQuery({ query, signal: controller.signal })) {
                         if (controller.signal.aborted) break;

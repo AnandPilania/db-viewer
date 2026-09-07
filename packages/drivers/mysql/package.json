@@ -10,11 +10,11 @@
     },
     "dependencies": {
         "@pilaniaanand/driver-interface": "workspace:*",
-        "mysql2": "^3.11.4"
+        "mysql2": "^3.24.3"
     },
     "devDependencies": {
-        "@types/node": "^22.9.0",
-        "typescript": "^5.6.3"
+        "@types/node": "^26.4.1",
+        "typescript": "^7.0.2"
     },
     "files": [
         "dist"

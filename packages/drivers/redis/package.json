@@ -10,11 +10,11 @@
     },
     "dependencies": {
         "@pilaniaanand/driver-interface": "workspace:*",
-        "redis": "^4.7.0"
+        "redis": "^6.2.1"
     },
     "devDependencies": {
-        "@types/node": "^22.9.0",
-        "typescript": "^5.6.3"
+        "@types/node": "^26.4.1",
+        "typescript": "^7.0.2"
     },
     "files": [
         "dist"

@@ -10,11 +10,12 @@
     },
     "dependencies": {
         "@pilaniaanand/driver-interface": "workspace:*",
-        "better-sqlite3": "^11.5.0"
+        "better-sqlite3": "^13.0.3"
     },
     "devDependencies": {
-        "@types/better-sqlite3": "^7.6.11",
-        "typescript": "^5.6.3"
+        "@types/better-sqlite3": "^9.6.0",
+        "@types/node": "^26.4.1",
+        "typescript": "^7.0.2"
     },
     "files": [
         "dist"

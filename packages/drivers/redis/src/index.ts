@@ -16,7 +16,7 @@ import type {
   SchemaSummary,
   StreamQueryOptions,
   TableDefinition,
-} from "@db-viewer/driver-interface";
+} from "@pilaniaanand/driver-interface";
 
 /**
  * Redis has no tables, columns, or fixed schema — just keys of five/six
@@ -60,6 +60,7 @@ class RedisConnection implements DriverConnection {
   private client: RedisClientType;
   private notifyClient: RedisClientType | null = null;
   private notifySetupPromise: Promise<void> | null = null;
+  private priorNotifyKeyspaceEvents: string | null = null;
   private watchHandlers = new Map<RedisKeyType, Set<(event: RowChangeEvent) => void>>();
 
   constructor(id: string, client: RedisClientType) {
@@ -124,7 +125,7 @@ class RedisConnection implements DriverConnection {
     limit: number,
     signal?: AbortSignal
   ): Promise<{ keys: string[]; nextCursor: string | null }> {
-    let cursor = Number(startCursor) || 0;
+    let cursor = startCursor || "0";
     const collected: string[] = [];
     let loops = 0;
 
@@ -134,14 +135,14 @@ class RedisConnection implements DriverConnection {
       cursor = result.cursor;
       collected.push(...result.keys);
       loops++;
-    } while (cursor !== 0 && collected.length < limit && loops < MAX_SCAN_LOOPS_PER_PAGE);
+    } while (cursor !== "0" && collected.length < limit && loops < MAX_SCAN_LOOPS_PER_PAGE);
 
     const page = collected.slice(0, limit);
     // If we trimmed extra keys off a full batch, we still have more to give
     // out before advancing the real cursor — but SCAN doesn't support
     // "rewind", so any overflow beyond `limit` within the same batch is
     // simply deferred to the next page via the cursor Redis already gave us.
-    const nextCursor = cursor === 0 && page.length === collected.length ? null : String(cursor);
+    const nextCursor = cursor === "0" && page.length === collected.length ? null : cursor;
     return { keys: page, nextCursor };
   }
 
@@ -181,14 +182,14 @@ class RedisConnection implements DriverConnection {
   }
 
   async countRowsExact(table: string, _schema?: string, signal?: AbortSignal): Promise<RowCountExact> {
-    let cursor = 0;
+    let cursor = "0";
     let count = 0;
     do {
       if (signal?.aborted) break;
       const result = await this.client.scan(cursor, { MATCH: "*", COUNT: SCAN_COUNT_HINT, TYPE: table as RedisKeyType });
       cursor = result.cursor;
       count += result.keys.length;
-    } while (cursor !== 0);
+    } while (cursor !== "0");
     return { value: count, exact: true };
   }
 
@@ -201,7 +202,7 @@ class RedisConnection implements DriverConnection {
 
     const chunkSize = options.chunkSize ?? 500;
     const limit = spec.limit ?? Number.MAX_SAFE_INTEGER;
-    let cursor = 0;
+    let cursor = "0";
     let emitted = 0;
     let batch: Record<string, unknown>[] = [];
 
@@ -223,7 +224,7 @@ class RedisConnection implements DriverConnection {
           batch = [];
         }
       }
-    } while (cursor !== 0 && emitted < limit && !options.signal?.aborted);
+    } while (cursor !== "0" && emitted < limit && !options.signal?.aborted);
 
     if (batch.length) yield { rows: batch, nextCursor: null, columns: columnsFor(spec.type) };
   }
@@ -356,6 +357,8 @@ class RedisConnection implements DriverConnection {
         // if the server denies it (some managed Redis providers lock this
         // down), we log and simply get no native events — app-originated
         // events still work via the WebSocket broadcast layer regardless.
+        const current = await this.client.configGet("notify-keyspace-events");
+        this.priorNotifyKeyspaceEvents = current["notify-keyspace-events"] ?? "";
         await this.client.configSet("notify-keyspace-events", "KEA");
       } catch (err) {
         console.error("Could not enable Redis keyspace notifications:", (err as Error).message);
@@ -399,6 +402,9 @@ class RedisConnection implements DriverConnection {
   }
 
   async close(): Promise<void> {
+    if (this.priorNotifyKeyspaceEvents !== null) {
+      await this.client.configSet("notify-keyspace-events", this.priorNotifyKeyspaceEvents).catch(() => {});
+    }
     if (this.notifyClient) await this.notifyClient.quit().catch(() => {});
     await this.client.quit();
   }
@@ -420,7 +426,12 @@ export const redisDriver: DatabaseDriver = {
   capabilities: { transactions: false, schemas: false, streaming: true, cancellation: true, queryLanguage: "redis-command" },
 
   async testConnection(config: ConnectionConfig) {
-    const client = createClient({ url: buildUrl(config), socket: { connectTimeout: 5000 } });
+    // reconnectStrategy: false is load-bearing, not just tidiness — node-redis
+    // v6 defaults to retrying its connection handshake forever (exponential
+    // backoff, no cap) on failures like a wrong password, so a bad config
+    // would otherwise hang this call indefinitely instead of ever rejecting.
+    const client = createClient({ url: buildUrl(config), socket: { connectTimeout: 5000, reconnectStrategy: false } });
+    client.on("error", () => {}); // avoid an unhandled 'error' event crashing the process while we await connect() below
     try {
       await client.connect();
       await client.ping();
@@ -433,7 +444,11 @@ export const redisDriver: DatabaseDriver = {
   },
 
   async connect(config: ConnectionConfig): Promise<DriverConnection> {
-    const client: RedisClientType = createClient({ url: buildUrl(config) });
+    // Same reconnectStrategy: false reasoning as testConnection — this is a
+    // db-browsing tool, not a resilient long-running service, so a dropped
+    // connection should surface as a clear error the user can retry from the
+    // UI rather than retry forever in the background.
+    const client: RedisClientType = createClient({ url: buildUrl(config), socket: { reconnectStrategy: false } });
     await client.connect();
     return new RedisConnection(config.id, client);
   },

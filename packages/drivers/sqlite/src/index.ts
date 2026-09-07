@@ -1,20 +1,37 @@
 import Database from "better-sqlite3";
-import type {
-    ColumnDefinition,
-    ColumnType,
-    ConnectionConfig,
-    DatabaseDriver,
-    DriverConnection,
-    ExecSpec,
-    QueryExecResult,
-    QueryRowsOptions,
-    QueryRowsResult,
-    RowCountEstimate,
-    RowCountExact,
-    SchemaSummary,
-    StreamQueryOptions,
-    TableDefinition,
+import {
+    diffTableSnapshots,
+    assertSafeIdentifier,
+    type ColumnDefinition,
+    type ColumnType,
+    type ConnectionConfig,
+    type DatabaseDriver,
+    type DriverConnection,
+    type ExecSpec,
+    type QueryExecResult,
+    type QueryRowsOptions,
+    type QueryRowsResult,
+    type RowChangeEvent,
+    type RowCountEstimate,
+    type RowCountExact,
+    type SchemaSummary,
+    type StreamQueryOptions,
+    type TableDefinition,
 } from "@pilaniaanand/driver-interface";
+
+// SQLite has no push notification for writes from other connections/processes
+// (its update hook is per-connection, in-process only) — data_version is a
+// counter maintained by SQLite itself that increments on any change to the
+// file from any connection, so polling it is the cheapest way to notice we
+// need to re-check a watched table at all before paying for a full re-query.
+const POLL_INTERVAL_MS = 1000;
+const WATCH_ROW_LIMIT = 1000;
+
+// Only these ever reach the "else" branch in queryRows below (is_null/
+// is_not_null/in/like are handled separately) — anything else is a request
+// body forged past the frontend's own TS types, since QueryFilter.op is a
+// closed union there but req.body is untyped on arrival at the server.
+const SAFE_COMPARISON_OPS = new Set(["=", "!=", ">", ">=", "<", "<="]);
 
 function mapSqliteType(declared: string): ColumnType {
     const t = declared.toUpperCase();
@@ -39,6 +56,7 @@ function decodeCursor(cursor: string): unknown {
 class SqliteConnection implements DriverConnection {
     readonly id: string;
     private db: Database.Database;
+    private watchIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
     constructor(id: string, db: Database.Database) {
         this.id = id;
@@ -103,6 +121,7 @@ class SqliteConnection implements DriverConnection {
     }
 
     async describeTable(table: string): Promise<TableDefinition> {
+        assertSafeIdentifier(table, "table");
         return {
             name: table,
             kind: "table",
@@ -117,6 +136,11 @@ class SqliteConnection implements DriverConnection {
 
     async queryRows(options: QueryRowsOptions): Promise<QueryRowsResult> {
         const { table, pageSize, afterCursor, filters, sort } = options;
+        assertSafeIdentifier(table, "table");
+        for (const c of options.columns ?? []) assertSafeIdentifier(c, "column");
+        for (const f of filters ?? []) assertSafeIdentifier(f.column, "column");
+        for (const s of sort ?? []) assertSafeIdentifier(s.column, "column");
+
         const pk = this.primaryKeyColumn(table);
         const columns = this.describeColumnsSync(table);
         const selectCols = options.columns?.length ? options.columns.map((c) => `"${c}"`).join(", ") : "*";
@@ -138,13 +162,16 @@ class SqliteConnection implements DriverConnection {
                 where.push(`"${f.column}" IN (${f.value.map(() => "?").join(",")})`);
                 params.push(...f.value);
             } else {
+                if (!SAFE_COMPARISON_OPS.has(f.op)) throw new Error(`Invalid filter operator: ${JSON.stringify(f.op)}`);
                 where.push(`"${f.column}" ${f.op} ?`);
                 params.push(f.value);
             }
         }
 
         const orderBy = sort?.length
-            ? sort.map((s) => `"${s.column}" ${s.direction.toUpperCase()}`).join(", ") + `, "${pk}" ASC`
+            ? sort
+                .map((s) => `"${s.column}" ${s.direction === "desc" ? "DESC" : "ASC"}`)
+                .join(", ") + `, "${pk}" ASC`
             : `"${pk}" ASC`;
 
         const sql = `SELECT ${selectCols} FROM "${table}" ${where.length ? "WHERE " + where.join(" AND ") : ""
@@ -160,6 +187,7 @@ class SqliteConnection implements DriverConnection {
     }
 
     async estimateRowCount(table: string): Promise<RowCountEstimate> {
+        assertSafeIdentifier(table, "table");
         // SQLite has no cheap statistics table by default; MAX(rowid) is a fast
         // approximation for rowid tables and is still O(log n) via the index.
         try {
@@ -171,6 +199,7 @@ class SqliteConnection implements DriverConnection {
     }
 
     async countRowsExact(table: string): Promise<RowCountExact> {
+        assertSafeIdentifier(table, "table");
         const row = this.db.prepare(`SELECT COUNT(*) as c FROM "${table}"`).get() as { c: number };
         return { value: row.c, exact: true };
     }
@@ -212,7 +241,9 @@ class SqliteConnection implements DriverConnection {
     }
 
     async insertRow(table: string, _schema: string | undefined, values: Record<string, unknown>): Promise<Record<string, unknown>> {
+        assertSafeIdentifier(table, "table");
         const cols = Object.keys(values);
+        for (const c of cols) assertSafeIdentifier(c, "column");
         const placeholders = cols.map(() => "?").join(", ");
         const colList = cols.map((c) => `"${c}"`).join(", ");
         const sql = `INSERT INTO "${table}" (${colList}) VALUES (${placeholders})`;
@@ -231,7 +262,10 @@ class SqliteConnection implements DriverConnection {
         column: string,
         value: unknown
     ): Promise<void> {
+        assertSafeIdentifier(table, "table");
+        assertSafeIdentifier(column, "column");
         const pkCols = Object.keys(primaryKey);
+        for (const c of pkCols) assertSafeIdentifier(c, "column");
         const setClause = `"${column}" = ?`;
         const whereClause = pkCols.map((c) => `"${c}" = ?`).join(" AND ");
         const sql = `UPDATE "${table}" SET ${setClause} WHERE ${whereClause}`;
@@ -239,13 +273,50 @@ class SqliteConnection implements DriverConnection {
     }
 
     async deleteRow(table: string, _schema: string | undefined, primaryKey: Record<string, unknown>): Promise<void> {
+        assertSafeIdentifier(table, "table");
         const pkCols = Object.keys(primaryKey);
         if (pkCols.length === 0) throw new Error("deleteRow requires at least one primary key column");
+        for (const c of pkCols) assertSafeIdentifier(c, "column");
         const whereClause = pkCols.map((c) => `"${c}" = ?`).join(" AND ");
         this.db.prepare(`DELETE FROM "${table}" WHERE ${whereClause}`).run(...pkCols.map((c) => primaryKey[c]));
     }
 
+    watchTable(table: string, _schema: string | undefined, onChange: (event: RowChangeEvent) => void): () => void {
+        assertSafeIdentifier(table, "table");
+        const pkCols = [this.primaryKeyColumn(table)];
+        const readSnapshot = () => this.db.prepare(`SELECT * FROM "${table}" LIMIT ${WATCH_ROW_LIMIT}`).all() as Record<string, unknown>[];
+        const readDataVersion = () =>
+            (this.db.pragma("data_version", { simple: false }) as { data_version: number }[])[0].data_version;
+
+        let lastDataVersion = readDataVersion();
+        let lastRows = readSnapshot(); // baseline — first real change is what gets diffed, not the table's existing contents
+
+        this.watchIntervals.set(
+            table,
+            setInterval(() => {
+                try {
+                    const dataVersion = readDataVersion();
+                    if (dataVersion === lastDataVersion) return;
+                    lastDataVersion = dataVersion;
+                    const rows = readSnapshot();
+                    for (const event of diffTableSnapshots(lastRows, rows, pkCols)) onChange(event);
+                    lastRows = rows;
+                } catch (err) {
+                    console.error(`SQLite table-watch poll failed for "${table}":`, (err as Error).message);
+                }
+            }, POLL_INTERVAL_MS)
+        );
+
+        return () => {
+            const interval = this.watchIntervals.get(table);
+            if (interval) clearInterval(interval);
+            this.watchIntervals.delete(table);
+        };
+    }
+
     async close(): Promise<void> {
+        for (const interval of this.watchIntervals.values()) clearInterval(interval);
+        this.watchIntervals.clear();
         this.db.close();
     }
 }

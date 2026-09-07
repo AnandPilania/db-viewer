@@ -1,6 +1,10 @@
 import { useCallback, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Responsive, WidthProvider, type Layout } from "react-grid-layout";
+import { Responsive, type Layout } from "react-grid-layout";
+// v2 moved WidthProvider out of the main entry (replaced by a useContainerWidth
+// hook for new code) but still ships it from /legacy as a generic HOC — still
+// the simplest fit here since `width` remains a required prop either way.
+import { WidthProvider } from "react-grid-layout/legacy";
 import { Plus, Share2, Copy, Check } from "lucide-react";
 import { dashboardApi, type Widget } from "@/lib/api";
 import { WidgetForm } from "@/components/WidgetForm";
@@ -9,12 +13,12 @@ import { Button } from "@/components/ui/button";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 
-const ResponsiveGridLayout = WidthProvider(Responsive);
-
 interface Props {
   dashboardId: string;
   onBack: () => void;
 }
+
+const ResponsiveGridLayout = WidthProvider(Responsive);
 
 const COLS = 12;
 const ROW_HEIGHT = 28;
@@ -67,7 +71,7 @@ export function DashboardBuilder({ dashboardId, onBack }: Props) {
   // continuously while dragging/resizing, so we save to the server only
   // once the user pauses, not on every intermediate frame.
   const handleLayoutChange = useCallback(
-    (rglLayout: Layout[]) => {
+    (rglLayout: Layout) => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => {
         const newLayout = rglLayout.map((item) => ({
@@ -87,7 +91,7 @@ export function DashboardBuilder({ dashboardId, onBack }: Props) {
 
   if (!dashboard) return null;
 
-  const rglLayout: Layout[] = dashboard.layout.map((item) => ({
+  const rglLayout: Layout = dashboard.layout.map((item) => ({
     i: item.widgetId,
     x: item.x,
     y: item.y,
@@ -134,7 +138,7 @@ export function DashboardBuilder({ dashboardId, onBack }: Props) {
             cols={{ lg: COLS }}
             rowHeight={ROW_HEIGHT}
             margin={[12, 12]}
-            draggableHandle=".widget-drag-handle"
+            dragConfig={{ handle: ".widget-drag-handle" }}
             onLayoutChange={handleLayoutChange}
           >
             {dashboard.layout.map((item) => {

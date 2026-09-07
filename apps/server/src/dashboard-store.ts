@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { nanoid } from "nanoid";
 import { DATA_DIR } from "./crypto.js";
+import { logger } from "./logger.js";
 import type { Dashboard, DashboardLayoutItem } from "./models.js";
 
 const STORE_PATH = path.join(DATA_DIR, "dashboards.json");
@@ -16,7 +17,7 @@ class DashboardStore {
       const raw: Dashboard[] = JSON.parse(fs.readFileSync(STORE_PATH, "utf-8"));
       for (const d of raw) this.dashboards.set(d.id, d);
     } catch (err) {
-      console.error("Failed to load persisted dashboards:", err);
+      logger.error({ err }, "Failed to load persisted dashboards");
     }
   }
 

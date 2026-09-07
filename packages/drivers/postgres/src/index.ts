@@ -1,25 +1,40 @@
 /// <reference path="./pg-cursor.d.ts" />
 import pg from "pg";
 import Cursor from "pg-cursor";
-import type {
-    ColumnDefinition,
-    ColumnType,
-    ConnectionConfig,
-    DatabaseDriver,
-    DriverConnection,
-    ExecSpec,
-    QueryExecResult,
-    QueryRowsOptions,
-    QueryRowsResult,
-    RowChangeEvent,
-    RowCountEstimate,
-    RowCountExact,
-    SchemaSummary,
-    StreamQueryOptions,
-    TableDefinition,
+import {
+    resolveSsl,
+    assertSafeIdentifier,
+    type ColumnDefinition,
+    type ColumnType,
+    type ConnectionConfig,
+    type DatabaseDriver,
+    type DriverConnection,
+    type ExecSpec,
+    type QueryExecResult,
+    type QueryRowsOptions,
+    type QueryRowsResult,
+    type RowChangeEvent,
+    type RowCountEstimate,
+    type RowCountExact,
+    type SchemaSummary,
+    type StreamQueryOptions,
+    type TableDefinition,
 } from "@pilaniaanand/driver-interface";
 
 const { Pool } = pg;
+
+// Only these ever reach the "else" branch below (is_null/is_not_null/in are
+// handled separately) — anything else is a request body forged past the
+// frontend's own TS types, since QueryFilter.op is a closed union there but
+// req.body is untyped on arrival at the server.
+const SAFE_COMPARISON_OPS = new Set(["=", "!=", ">", ">=", "<", "<=", "like"]);
+
+/** node-postgres's ssl option accepts ca/cert/key directly as PEM strings — no temp files needed. */
+function toPgSsl(config: ConnectionConfig): pg.PoolConfig["ssl"] {
+    const ssl = resolveSsl(config.ssl);
+    if (!ssl) return undefined;
+    return { rejectUnauthorized: ssl.rejectUnauthorized ?? false, ca: ssl.ca, cert: ssl.cert, key: ssl.key };
+}
 
 function mapPgType(dataType: string): ColumnType {
     const t = dataType.toLowerCase();
@@ -147,6 +162,11 @@ class PostgresConnection implements DriverConnection {
 
     async queryRows(options: QueryRowsOptions): Promise<QueryRowsResult> {
         const schema = options.schema ?? "public";
+        assertSafeIdentifier(options.table, "table");
+        assertSafeIdentifier(schema, "schema");
+        for (const c of options.columns ?? []) assertSafeIdentifier(c, "column");
+        for (const f of options.filters ?? []) assertSafeIdentifier(f.column, "column");
+
         const pkCols = await this.primaryKeyColumns(options.table, schema);
         const columns = await this.describeColumns(options.table, schema);
         const selectCols = options.columns?.length ? options.columns.map((c) => `"${c}"`).join(", ") : "*";
@@ -171,6 +191,7 @@ class PostgresConnection implements DriverConnection {
                 where.push(`"${f.column}" IN (${placeholders})`);
                 params.push(...f.value);
             } else {
+                if (!SAFE_COMPARISON_OPS.has(f.op)) throw new Error(`Invalid filter operator: ${JSON.stringify(f.op)}`);
                 const opSql = f.op === "like" ? "LIKE" : f.op;
                 where.push(`"${f.column}" ${opSql} $${p++}`);
                 params.push(f.value);
@@ -206,6 +227,8 @@ class PostgresConnection implements DriverConnection {
     }
 
     async countRowsExact(table: string, schema = "public", signal?: AbortSignal): Promise<RowCountExact> {
+        assertSafeIdentifier(table, "table");
+        assertSafeIdentifier(schema, "schema");
         const client = await this.pool.connect();
         try {
             const pidRes = await client.query("SELECT pg_backend_pid() AS pid");
@@ -285,7 +308,10 @@ class PostgresConnection implements DriverConnection {
         values: Record<string, unknown>
     ): Promise<Record<string, unknown>> {
         const s = schema ?? "public";
+        assertSafeIdentifier(table, "table");
+        assertSafeIdentifier(s, "schema");
         const cols = Object.keys(values);
+        for (const c of cols) assertSafeIdentifier(c, "column");
         const colList = cols.map((c) => `"${c}"`).join(", ");
         const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
         const sql = cols.length
@@ -303,7 +329,11 @@ class PostgresConnection implements DriverConnection {
         value: unknown
     ): Promise<void> {
         const s = schema ?? "public";
+        assertSafeIdentifier(table, "table");
+        assertSafeIdentifier(s, "schema");
+        assertSafeIdentifier(column, "column");
         const pkCols = Object.keys(primaryKey);
+        for (const c of pkCols) assertSafeIdentifier(c, "column");
         const setClause = `"${column}" = $1`;
         const whereClause = pkCols.map((c, i) => `"${c}" = $${i + 2}`).join(" AND ");
         const sql = `UPDATE "${s}"."${table}" SET ${setClause} WHERE ${whereClause}`;
@@ -312,8 +342,11 @@ class PostgresConnection implements DriverConnection {
 
     async deleteRow(table: string, schema: string | undefined, primaryKey: Record<string, unknown>): Promise<void> {
         const s = schema ?? "public";
+        assertSafeIdentifier(table, "table");
+        assertSafeIdentifier(s, "schema");
         const pkCols = Object.keys(primaryKey);
         if (pkCols.length === 0) throw new Error("deleteRow requires at least one primary key column");
+        for (const c of pkCols) assertSafeIdentifier(c, "column");
         const whereClause = pkCols.map((c, i) => `"${c}" = $${i + 1}`).join(" AND ");
         await this.pool.query(`DELETE FROM "${s}"."${table}" WHERE ${whereClause}`, pkCols.map((c) => primaryKey[c]));
     }
@@ -332,6 +365,8 @@ class PostgresConnection implements DriverConnection {
      */
     watchTable(table: string, schema: string | undefined, onChange: (event: RowChangeEvent) => void): () => void {
         const s = schema ?? "public";
+        assertSafeIdentifier(table, "table");
+        assertSafeIdentifier(s, "schema");
         const key = `${s}.${table}`;
 
         if (!this.watchHandlers.has(key)) this.watchHandlers.set(key, new Set());
@@ -355,16 +390,41 @@ class PostgresConnection implements DriverConnection {
             await this.pool.query(`
         CREATE OR REPLACE FUNCTION __dbviewer_notify_change() RETURNS TRIGGER AS $$
         DECLARE
-          payload JSON;
+          row_json JSON;
+          payload TEXT;
         BEGIN
-          IF TG_OP = 'DELETE' THEN
-            payload = row_to_json(OLD);
-          ELSE
-            payload = row_to_json(NEW);
-          END IF;
-          PERFORM pg_notify('dbviewer_changes', json_build_object(
-            'schema', TG_TABLE_SCHEMA, 'table', TG_TABLE_NAME, 'op', TG_OP, 'row', payload
-          )::text);
+          -- This trigger exists purely to power an optional live-updates
+          -- feature in db-viewer — it must never be able to abort or
+          -- otherwise interfere with the write that fired it, no matter
+          -- what goes wrong in here (a payload too large for pg_notify's
+          -- hard ~8000-byte limit — a real production incident this
+          -- exact function caused before this guard existed — or any
+          -- other unexpected error).
+          BEGIN
+            IF TG_OP = 'DELETE' THEN
+              row_json := row_to_json(OLD);
+            ELSE
+              row_json := row_to_json(NEW);
+            END IF;
+
+            payload := json_build_object(
+              'schema', TG_TABLE_SCHEMA, 'table', TG_TABLE_NAME, 'op', TG_OP, 'row', row_json
+            )::text;
+
+            -- A wide row (large text/jsonb/encrypted-blob columns) can push
+            -- the full-row payload past pg_notify's limit. Rather than risk
+            -- that, drop the row data above a safe threshold and send just
+            -- the identifying fields — db-viewer falls back to treating it
+            -- as a plain "something changed" signal for that one event
+            -- instead of patching in place.
+            IF octet_length(payload) > 7500 THEN
+              payload := json_build_object('schema', TG_TABLE_SCHEMA, 'table', TG_TABLE_NAME, 'op', TG_OP)::text;
+            END IF;
+
+            PERFORM pg_notify('dbviewer_changes', payload);
+          EXCEPTION WHEN OTHERS THEN
+            NULL;
+          END;
           RETURN NULL;
         END;
         $$ LANGUAGE plpgsql;
@@ -384,7 +444,7 @@ class PostgresConnection implements DriverConnection {
                 await client.query("LISTEN dbviewer_changes");
                 client.on("notification", (msg) => {
                     if (!msg.payload) return;
-                    let parsed: { schema: string; table: string; op: string; row: Record<string, unknown> };
+                    let parsed: { schema: string; table: string; op: string; row?: Record<string, unknown> };
                     try {
                         parsed = JSON.parse(msg.payload);
                     } catch {
@@ -406,6 +466,13 @@ class PostgresConnection implements DriverConnection {
     }
 
     async close(): Promise<void> {
+        for (const key of this.triggersInstalled) {
+            const [schema, table] = key.split(".");
+            await this.pool.query(`DROP TRIGGER IF EXISTS __dbviewer_watch ON "${schema}"."${table}"`).catch(() => {});
+        }
+        if (this.triggersInstalled.size > 0) {
+            await this.pool.query(`DROP FUNCTION IF EXISTS __dbviewer_notify_change()`).catch(() => {});
+        }
         if (this.listenerClient) this.listenerClient.release();
         await this.pool.end();
     }
@@ -423,7 +490,7 @@ export const postgresDriver: DatabaseDriver = {
             database: config.database,
             user: config.username,
             password: config.password,
-            ssl: config.ssl ? { rejectUnauthorized: false } : undefined,
+            ssl: toPgSsl(config),
             max: 1,
             connectionTimeoutMillis: 5000,
         });
@@ -444,7 +511,7 @@ export const postgresDriver: DatabaseDriver = {
             database: config.database,
             user: config.username,
             password: config.password,
-            ssl: config.ssl ? { rejectUnauthorized: false } : undefined,
+            ssl: toPgSsl(config),
             max: 10,
         });
         return new PostgresConnection(config.id, pool);

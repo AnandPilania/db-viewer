@@ -14,9 +14,24 @@ import { widgetRoutes } from "./routes/widgets.js";
 import { dashboardRoutes } from "./routes/dashboards.js";
 import { watchRoutes } from "./routes/watch.js";
 import { publicWatchRoutes } from "./routes/public-watch.js";
+import { clientErrorRoutes } from "./routes/client-errors.js";
 import { registry } from "./registry.js";
+import { logger } from "./logger.js";
 
-const app = Fastify({ logger: true });
+// Anything that reaches here would otherwise crash the process silently (or
+// with only a stdout stack trace lost the moment the terminal closes) — log
+// it to the daily file first. An uncaught exception leaves the process in an
+// unknown state, so we still exit after logging; a rejected promise that
+// nobody awaited is usually recoverable, so we only log it.
+process.on("uncaughtException", (err) => {
+    logger.error({ err }, "Uncaught exception");
+    process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+    logger.error({ err: reason }, "Unhandled promise rejection");
+});
+
+const app = Fastify({ loggerInstance: logger });
 
 await registry.discover();
 const active = registry.list();
@@ -50,6 +65,7 @@ await app.register(widgetRoutes);
 await app.register(dashboardRoutes);
 await app.register(watchRoutes);
 await app.register(publicWatchRoutes);
+await app.register(clientErrorRoutes);
 
 app.get("/api/health", async () => ({ ok: true }));
 

@@ -54,6 +54,31 @@ export interface SchemaSummary {
     tables: Array<Pick<TableDefinition, "schema" | "name" | "kind">>;
 }
 
+/** TLS options for connecting directly to a database that requires (or accepts) certificate-based auth. */
+export interface SslConfig {
+    enabled: boolean;
+    rejectUnauthorized?: boolean; // default true; set false only for self-signed certs you trust out-of-band
+    ca?: string; // PEM contents of the CA certificate
+    cert?: string; // PEM contents of the client certificate
+    key?: string; // PEM contents of the client private key
+}
+
+/**
+ * Connects to `host`/`port` through an SSH server first — the standard way
+ * to reach a database sitting in a private subnet behind a bastion/jump
+ * host (e.g. AWS RDS). `privateKey` accepts OpenSSH PEM or PuTTY PPK
+ * contents; ssh2 auto-detects the format.
+ */
+export interface SshTunnelConfig {
+    enabled: boolean;
+    host: string;
+    port?: number; // default 22
+    username: string;
+    privateKey?: string; // PEM or PPK contents, pasted or uploaded
+    passphrase?: string; // for an encrypted privateKey
+    password?: string; // alternative to privateKey
+}
+
 export interface ConnectionConfig {
     id: string;
     driver: string; // registry key, e.g. "postgres", "mysql", "sqlite", "mongodb"
@@ -63,8 +88,51 @@ export interface ConnectionConfig {
     username?: string;
     password?: string;
     filePath?: string; // for file-based drivers like sqlite
-    ssl?: boolean;
+    ssl?: boolean | SslConfig; // boolean is a plain "use TLS" toggle; SslConfig adds client-cert auth
+    sshTunnel?: SshTunnelConfig;
+    /**
+     * App-level safety net: when true, every write/DDL operation against this
+     * connection is rejected before it reaches the driver — insertRow/
+     * updateCell/deleteRow outright, and execute() for any query whose intent
+     * isn't a plain read (see isDestructiveExec). This is enforced by the
+     * server (routes/connections.ts), not by individual drivers.
+     *
+     * This is a UX/compliance safety net, not a substitute for real access
+     * control — a connection string with write privileges can still write if
+     * something reaches the underlying client directly. For a guarantee that
+     * survives an application bug, connect with a database role that only
+     * has SELECT granted (or point this at a read replica) — that's the one
+     * layer this app cannot bypass no matter what.
+     */
+    readOnly?: boolean;
     extra?: Record<string, unknown>; // driver-specific overflow (e.g. mongo replica set opts)
+}
+
+/** Normalizes the two `ssl` shapes drivers can receive into one, or undefined if TLS isn't requested. */
+export function resolveSsl(ssl: ConnectionConfig["ssl"]): SslConfig | undefined {
+    if (!ssl) return undefined;
+    if (ssl === true) return { enabled: true };
+    return ssl.enabled ? ssl : undefined;
+}
+
+/**
+ * Matches a bare SQL identifier: letters/digits/underscore, not starting
+ * with a digit. SQL has no parameterized-identifier mechanism the way it
+ * does for values (no driver supports `WHERE $1 = $2` binding a column
+ * name) — every SQL driver's structured operations (queryRows filters,
+ * insertRow/updateCell/deleteRow column names, the table/schema name
+ * itself) must run every client-supplied identifier through
+ * `assertSafeIdentifier` before interpolating it into a query string.
+ * Rejecting anything outside this charset closes identifier-based SQL
+ * injection outright — no quote, backtick, semicolon, or comment sequence
+ * can ever reach the query text.
+ */
+const SAFE_SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export function assertSafeIdentifier(name: string, kind: string): void {
+    if (typeof name !== "string" || !SAFE_SQL_IDENTIFIER.test(name)) {
+        throw new Error(`Invalid ${kind} name: ${JSON.stringify(name)}`);
+    }
 }
 
 export interface CursorPage {
@@ -96,6 +164,38 @@ export interface RowChangeEvent {
     primaryKey?: Record<string, unknown>; // present for update/delete
     column?: string; // present for update
     value?: unknown; // present for update
+}
+
+/**
+ * Shared building block for drivers with no native change feed: given two
+ * full-table snapshots and the table's primary key columns, produces the
+ * same RowChangeEvent shape a native watcher would emit. A changed row is
+ * reported as a single "__row__" update (see useTableRows.ts) rather than
+ * diffed field-by-field — the snapshot doesn't tell us which columns moved,
+ * only that the row did.
+ */
+export function diffTableSnapshots(
+    prevRows: Record<string, unknown>[],
+    currRows: Record<string, unknown>[],
+    pkColumns: string[]
+): RowChangeEvent[] {
+    const keyOf = (row: Record<string, unknown>) => JSON.stringify(pkColumns.map((c) => row[c]));
+    const pkOf = (row: Record<string, unknown>) => Object.fromEntries(pkColumns.map((c) => [c, row[c]]));
+    const prevByKey = new Map(prevRows.map((r) => [keyOf(r), r]));
+    const currByKey = new Map(currRows.map((r) => [keyOf(r), r]));
+    const events: RowChangeEvent[] = [];
+
+    for (const [key, row] of currByKey) {
+        const prevRow = prevByKey.get(key);
+        if (!prevRow) events.push({ type: "insert", row });
+        else if (JSON.stringify(prevRow) !== JSON.stringify(row)) {
+            events.push({ type: "update", primaryKey: pkOf(row), column: "__row__", value: row });
+        }
+    }
+    for (const [key, row] of prevByKey) {
+        if (!currByKey.has(key)) events.push({ type: "delete", primaryKey: pkOf(row) });
+    }
+    return events;
 }
 
 export interface QueryRowsResult {
@@ -171,6 +271,51 @@ export interface StreamQueryOptions {
     query: QuerySpec;
     chunkSize?: number; // rows per emitted chunk, default driver-defined
     signal?: AbortSignal;
+}
+
+const SQL_SAFE_LEADING_KEYWORDS = new Set(["select", "with", "explain", "show", "describe", "desc", "pragma", "values"]);
+// Whole-word scan for write/DDL verbs anywhere in the statement — catches a
+// write smuggled inside a CTE (`WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x`),
+// which a leading-keyword check alone would miss.
+const SQL_WRITE_VERB = /\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|merge|call|copy|vacuum|reindex|lock|replace|into\s+outfile)\b/i;
+
+const REDIS_SAFE_READ_COMMANDS = new Set([
+    "get", "mget", "strlen", "getrange", "exists", "type", "ttl", "pttl", "scan", "keys", "dbsize",
+    "hget", "hmget", "hgetall", "hkeys", "hvals", "hlen", "hrandfield", "hexists", "hscan", "hstrlen",
+    "lrange", "llen", "lindex", "lpos",
+    "smembers", "scard", "sismember", "smismember", "srandmember", "sscan", "sinter", "sunion", "sdiff",
+    "zrange", "zrangebyscore", "zrevrange", "zrevrangebyscore", "zscore", "zmscore", "zcard", "zcount",
+    "zrank", "zrevrank", "zscan",
+    "xrange", "xrevrange", "xlen", "xread",
+    "ping", "echo", "info", "time", "config", "client", "object", "memory", "randomkey", "touch",
+]);
+
+/**
+ * True if this write/DDL/execute request should be blocked when the
+ * connection is read-only. Deliberately fails closed: for SQL, anything not
+ * lexically recognizable as a plain read is treated as destructive; for
+ * Mongo, execute() only ever carries write ops (reads go through
+ * queryRows), so it's always destructive; for Redis, only a fixed allowlist
+ * of read commands is permitted.
+ */
+export function isDestructiveExec(query: ExecSpec): boolean {
+    if (query.language === "mongo") return true;
+    if (query.language === "redis-command") {
+        const cmd = query.command[0]?.toLowerCase();
+        return !cmd || !REDIS_SAFE_READ_COMMANDS.has(cmd);
+    }
+    // SQL
+    const statements = query.sql
+        .replace(/--[^\n]*/g, " ") // line comments
+        .replace(/\/\*[\s\S]*?\*\//g, " ") // block comments
+        .split(";")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    if (statements.length !== 1) return true; // no legitimate read needs multiple statements
+    const stmt = statements[0];
+    const leading = stmt.match(/^[A-Za-z]+/)?.[0]?.toLowerCase();
+    if (!leading || !SQL_SAFE_LEADING_KEYWORDS.has(leading)) return true;
+    return SQL_WRITE_VERB.test(stmt);
 }
 
 export interface QueryExecResult {
