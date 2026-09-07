@@ -1,57 +1,57 @@
 {
-    "name": "@pilaniaanand/db-viewer",
-    "version": "0.4.0",
-    "description": "Browse and query Postgres, MySQL, SQLite, MongoDB, Redis, and ClickHouse from one local web UI.",
-    "type": "module",
-    "engines": {
-        "node": "^20.19.0 || >=22.12.0"
-    },
-    "bin": {
-        "db-viewer": "./bin/db-viewer.js"
-    },
-    "files": [
-        "bin",
-        "server",
-        "public",
-        "scripts/prepack.mjs"
-    ],
-    "scripts": {
-        "start": "node bin/db-viewer.js",
-        "predev": "pnpm --filter \"@pilaniaanand/driver-*\" run build",
-        "dev": "pnpm --parallel --filter ./apps/* run dev",
-        "dev:server": "pnpm --filter \"@pilaniaanand/driver-*\" run build && pnpm --filter server run dev",
-        "dev:web": "pnpm --filter web run dev",
-        "build": "pnpm --filter \"@pilaniaanand/driver-*\" run build && pnpm -r run build",
-        "typecheck": "pnpm -r run typecheck",
-        "prepare": "pnpm run build",
-        "prepack": "node scripts/prepack.mjs",
-        "release": "node scripts/release.mjs"
-    },
-    "dependencies": {
-        "@fastify/cors": "^11.3.0",
-        "@fastify/rate-limit": "^11.2.0",
-        "@fastify/static": "^10.1.3",
-        "@fastify/websocket": "^11.3.0",
-        "@pilaniaanand/driver-interface": "workspace:*",
-        "fastify": "^5.12.3",
-        "fastify-plugin": "^6.0.0",
-        "nanoid": "^6.0.1"
-    },
-    "devDependencies": {
-        "typescript": "^7.0.2"
-    },
-    "publishConfig": {
-        "access": "public"
-    },
-    "keywords": [
-        "database",
-        "gui",
-        "postgres",
-        "mysql",
-        "sqlite",
-        "mongodb",
-        "redis",
-        "clickhouse"
-    ],
-    "license": "MIT"
+  "name": "@pilaniaanand/db-viewer",
+  "version": "0.5.0",
+  "description": "Browse and query Postgres, MySQL, SQLite, MongoDB, Redis, and ClickHouse from one local web UI.",
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "bin": {
+    "db-viewer": "./bin/db-viewer.js"
+  },
+  "files": [
+    "bin",
+    "server",
+    "public",
+    "scripts/prepack.mjs"
+  ],
+  "scripts": {
+    "start": "node bin/db-viewer.js",
+    "predev": "pnpm --filter \"@pilaniaanand/driver-*\" run build",
+    "dev": "pnpm --parallel --filter ./apps/* run dev",
+    "dev:server": "pnpm --filter \"@pilaniaanand/driver-*\" run build && pnpm --filter server run dev",
+    "dev:web": "pnpm --filter web run dev",
+    "build": "pnpm --filter \"@pilaniaanand/driver-*\" run build && pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "prepare": "pnpm run build",
+    "prepack": "node scripts/prepack.mjs",
+    "release": "node scripts/release.mjs"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/rate-limit": "^11.2.0",
+    "@fastify/static": "^10.1.3",
+    "@fastify/websocket": "^11.3.0",
+    "@pilaniaanand/driver-interface": "workspace:*",
+    "fastify": "^5.12.3",
+    "fastify-plugin": "^6.0.0",
+    "nanoid": "^6.0.1"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "database",
+    "gui",
+    "postgres",
+    "mysql",
+    "sqlite",
+    "mongodb",
+    "redis",
+    "clickhouse"
+  ],
+  "license": "MIT"
 }

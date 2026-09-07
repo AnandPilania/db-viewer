@@ -1,26 +1,26 @@
 {
-    "name": "@pilaniaanand/driver-sqlite",
-    "version": "0.4.0",
-    "type": "module",
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts",
-    "scripts": {
-        "typecheck": "tsc --noEmit",
-        "build": "tsc -p tsconfig.json"
-    },
-    "dependencies": {
-        "@pilaniaanand/driver-interface": "workspace:*",
-        "better-sqlite3": "^13.0.3"
-    },
-    "devDependencies": {
-        "@types/better-sqlite3": "^9.6.0",
-        "@types/node": "^26.4.1",
-        "typescript": "^7.0.2"
-    },
-    "files": [
-        "dist"
-    ],
-    "publishConfig": {
-        "access": "public"
-    }
+  "name": "@pilaniaanand/driver-sqlite",
+  "version": "0.5.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@pilaniaanand/driver-interface": "workspace:*",
+    "better-sqlite3": "^13.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }
