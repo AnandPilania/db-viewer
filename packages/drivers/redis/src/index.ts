@@ -358,8 +358,18 @@ class RedisConnection implements DriverConnection {
         // down), we log and simply get no native events — app-originated
         // events still work via the WebSocket broadcast layer regardless.
         const current = await this.client.configGet("notify-keyspace-events");
-        this.priorNotifyKeyspaceEvents = current["notify-keyspace-events"] ?? "";
-        await this.client.configSet("notify-keyspace-events", "KEA");
+        const currentValue = current["notify-keyspace-events"] ?? "";
+        // If a crash (kill -9, OOM, power loss) skips close() entirely, this
+        // setting is left however we set it — there's no way to run cleanup
+        // code after that. Only touch it when it isn't already sufficient,
+        // so: (a) a clean reconnect after our own crash finds "KEA" already
+        // there and does nothing, instead of re-capturing our own leftover
+        // value as the new "original" to restore later, and (b) we never
+        // overwrite another admin's already-adequate setting.
+        if (!currentValue.includes("E") || !currentValue.includes("A")) {
+          this.priorNotifyKeyspaceEvents = currentValue;
+          await this.client.configSet("notify-keyspace-events", "KEA");
+        }
       } catch (err) {
         console.error("Could not enable Redis keyspace notifications:", (err as Error).message);
         return;
