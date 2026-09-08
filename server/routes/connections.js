@@ -1,6 +1,12 @@
 import { connectionStore } from "../connection-store.js";
 import { registry } from "../registry.js";
 import { tableEvents } from "../table-events.js";
+import { assertWritable, assertExecutable, ReadOnlyError } from "../read-only.js";
+/** ReadOnlyError -> 403; everything else (driver/validation errors) -> 400, as every route already did. */
+function sendError(reply, err) {
+    reply.code(err instanceof ReadOnlyError ? 403 : 400);
+    return { error: err.message };
+}
 export async function connectionRoutes(app) {
     app.get("/api/drivers", async () => ({
         active: registry.list(),
@@ -13,8 +19,7 @@ export async function connectionRoutes(app) {
             return await connectionStore.create(body);
         }
         catch (err) {
-            reply.code(400);
-            return { error: err.message };
+            return sendError(reply, err);
         }
     });
     app.delete("/api/connections/:id", async (req, reply) => {
@@ -29,8 +34,7 @@ export async function connectionRoutes(app) {
             return await conn.listSchemas();
         }
         catch (err) {
-            reply.code(400);
-            return { error: err.message };
+            return sendError(reply, err);
         }
     });
     app.get("/api/connections/:id/tables", async (req, reply) => {
@@ -41,8 +45,7 @@ export async function connectionRoutes(app) {
             return await conn.listTables(schema);
         }
         catch (err) {
-            reply.code(400);
-            return { error: err.message };
+            return sendError(reply, err);
         }
     });
     app.get("/api/connections/:id/tables/:table", async (req, reply) => {
@@ -53,8 +56,7 @@ export async function connectionRoutes(app) {
             return await conn.describeTable(table, schema);
         }
         catch (err) {
-            reply.code(400);
-            return { error: err.message };
+            return sendError(reply, err);
         }
     });
     app.post("/api/connections/:id/tables/:table/rows", async (req, reply) => {
@@ -77,8 +79,7 @@ export async function connectionRoutes(app) {
             });
         }
         catch (err) {
-            reply.code(400);
-            return { error: err.message };
+            return sendError(reply, err);
         }
     });
     app.get("/api/connections/:id/tables/:table/count/estimate", async (req, reply) => {
@@ -89,8 +90,7 @@ export async function connectionRoutes(app) {
             return await conn.estimateRowCount(table, schema);
         }
         catch (err) {
-            reply.code(400);
-            return { error: err.message };
+            return sendError(reply, err);
         }
     });
     app.get("/api/connections/:id/tables/:table/count/exact", async (req, reply) => {
@@ -104,8 +104,7 @@ export async function connectionRoutes(app) {
             return await conn.countRowsExact(table, schema, controller.signal);
         }
         catch (err) {
-            reply.code(400);
-            return { error: err.message };
+            return sendError(reply, err);
         }
     });
     app.post("/api/connections/:id/execute", async (req, reply) => {
@@ -119,18 +118,19 @@ export async function connectionRoutes(app) {
             return { error: 'Missing or invalid "query" in request body' };
         }
         try {
+            assertExecutable(connectionStore.getConfig(id), query);
             const conn = await connectionStore.getLive(id);
             return await conn.execute(query, controller.signal);
         }
         catch (err) {
-            reply.code(400);
-            return { error: err.message };
+            return sendError(reply, err);
         }
     });
     app.post("/api/connections/:id/tables/:table/records", async (req, reply) => {
         const { id, table } = req.params;
         const { schema, values } = req.body;
         try {
+            assertWritable(connectionStore.getConfig(id));
             const conn = await connectionStore.getLive(id);
             const inserted = await conn.insertRow(table, schema, values);
             tableEvents.publish(id, table, { type: "insert", row: inserted });
@@ -138,36 +138,35 @@ export async function connectionRoutes(app) {
             return inserted;
         }
         catch (err) {
-            reply.code(400);
-            return { error: err.message };
+            return sendError(reply, err);
         }
     });
     app.delete("/api/connections/:id/tables/:table/records", async (req, reply) => {
         const { id, table } = req.params;
         const { schema, primaryKey } = req.body;
         try {
+            assertWritable(connectionStore.getConfig(id));
             const conn = await connectionStore.getLive(id);
             await conn.deleteRow(table, schema, primaryKey);
             tableEvents.publish(id, table, { type: "delete", primaryKey });
             reply.code(204);
         }
         catch (err) {
-            reply.code(400);
-            return { error: err.message };
+            return sendError(reply, err);
         }
     });
     app.patch("/api/connections/:id/tables/:table/cell", async (req, reply) => {
         const { id, table } = req.params;
         const { schema, primaryKey, column, value } = req.body;
         try {
+            assertWritable(connectionStore.getConfig(id));
             const conn = await connectionStore.getLive(id);
             await conn.updateCell(table, schema, primaryKey, column, value);
             tableEvents.publish(id, table, { type: "update", primaryKey, column, value });
             return { ok: true };
         }
         catch (err) {
-            reply.code(400);
-            return { error: err.message };
+            return sendError(reply, err);
         }
     });
 }
