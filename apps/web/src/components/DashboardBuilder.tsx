@@ -1,10 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Responsive, type Layout } from "react-grid-layout";
-// v2 moved WidthProvider out of the main entry (replaced by a useContainerWidth
-// hook for new code) but still ships it from /legacy as a generic HOC — still
-// the simplest fit here since `width` remains a required prop either way.
-import { WidthProvider } from "react-grid-layout/legacy";
+import { GridLayout, useContainerWidth, type Layout } from "react-grid-layout";
 import { Plus, Share2, Copy, Check } from "lucide-react";
 import { dashboardApi, type Widget } from "@/lib/api";
 import { WidgetForm } from "@/components/WidgetForm";
@@ -18,10 +14,9 @@ interface Props {
   onBack: () => void;
 }
 
-const ResponsiveGridLayout = WidthProvider(Responsive);
-
 const COLS = 12;
 const ROW_HEIGHT = 28;
+const MARGIN: [number, number] = [12, 12];
 
 export function DashboardBuilder({ dashboardId, onBack }: Props) {
   const queryClient = useQueryClient();
@@ -29,6 +24,7 @@ export function DashboardBuilder({ dashboardId, onBack }: Props) {
   const [editingWidget, setEditingWidget] = useState<Widget | null>(null);
   const [copied, setCopied] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { width, containerRef, mounted } = useContainerWidth();
 
   const { data: dashboard } = useQuery({
     queryKey: ["dashboard", dashboardId],
@@ -125,42 +121,43 @@ export function DashboardBuilder({ dashboardId, onBack }: Props) {
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-3">
+      <div ref={containerRef} className="flex-1 overflow-auto p-3">
         {dashboard.layout.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
             No widgets yet — add one to get started.
           </div>
         ) : (
-          <ResponsiveGridLayout
-            className="layout"
-            layouts={{ lg: rglLayout }}
-            breakpoints={{ lg: 0 }}
-            cols={{ lg: COLS }}
-            rowHeight={ROW_HEIGHT}
-            margin={[12, 12]}
-            dragConfig={{ handle: ".widget-drag-handle" }}
-            onLayoutChange={handleLayoutChange}
-          >
-            {dashboard.layout.map((item) => {
-              const widget = allWidgets?.find((w) => w.id === item.widgetId);
-              if (!widget) return null;
-              return (
-                <div key={item.widgetId}>
-                  <WidgetCard
-                    id={widget.id}
-                    title={widget.title}
-                    chartType={widget.chartType}
-                    fetchData={() => dashboardApi.widgetData(widget.id)}
-                    onRemove={() => removeFromLayout(widget.id)}
-                    onEdit={() => setEditingWidget(widget)}
-                    dragHandleClassName="widget-drag-handle"
-                    connectionId={widget.connectionId}
-                    table={widget.table}
-                  />
-                </div>
-              );
-            })}
-          </ResponsiveGridLayout>
+          mounted && (
+            <GridLayout
+              className="layout"
+              layout={rglLayout}
+              width={width}
+              gridConfig={{ cols: COLS, rowHeight: ROW_HEIGHT, margin: MARGIN }}
+              dragConfig={{ handle: ".widget-drag-handle" }}
+              onLayoutChange={handleLayoutChange}
+            >
+              {dashboard.layout.map((item) => {
+                const widget = allWidgets?.find((w) => w.id === item.widgetId);
+                if (!widget) return null;
+                return (
+                  <div key={item.widgetId}>
+                    <WidgetCard
+                      id={widget.id}
+                      title={widget.title}
+                      chartType={widget.chartType}
+                      fetchData={() => dashboardApi.widgetData(widget.id)}
+                      onRemove={() => removeFromLayout(widget.id)}
+                      onEdit={() => setEditingWidget(widget)}
+                      dragHandleClassName="widget-drag-handle"
+                      connectionId={widget.connectionId}
+                      table={widget.table}
+                      highlightRules={widget.highlightRules}
+                    />
+                  </div>
+                );
+              })}
+            </GridLayout>
+          )
         )}
       </div>
 

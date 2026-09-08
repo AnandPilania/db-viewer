@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { dashboardApi, type Widget } from "@/lib/api";
+import { dashboardApi, type Widget, type HighlightRule } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -14,7 +14,7 @@ interface Props {
   editingWidget?: Widget;
 }
 
-const CHART_TYPES: Widget["chartType"][] = ["bar", "line", "pie", "number", "table"];
+const CHART_TYPES: Widget["chartType"][] = ["bar", "line", "area", "scatter", "pie", "number", "table"];
 const AGGREGATIONS: Widget["aggregation"][] = ["count", "sum", "avg", "min", "max"];
 
 export function WidgetForm({ onCancel, onSaved, editingWidget }: Props) {
@@ -25,7 +25,10 @@ export function WidgetForm({ onCancel, onSaved, editingWidget }: Props) {
   const [chartType, setChartType] = useState<Widget["chartType"]>(editingWidget?.chartType ?? "bar");
   const [xField, setXField] = useState(editingWidget?.xField ?? "");
   const [yField, setYField] = useState(editingWidget?.yField ?? "");
+  const [xField2, setXField2] = useState(editingWidget?.xField2 ?? "");
   const [aggregation, setAggregation] = useState<Widget["aggregation"]>(editingWidget?.aggregation ?? "count");
+  const [filters, setFilters] = useState<{ column: string; value: string }[]>(editingWidget?.filters ?? []);
+  const [highlightRules, setHighlightRules] = useState<HighlightRule[]>(editingWidget?.highlightRules ?? []);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -46,11 +49,15 @@ export function WidgetForm({ onCancel, onSaved, editingWidget }: Props) {
       setError("Connection, table, and title are required");
       return;
     }
-    if ((chartType === "bar" || chartType === "line" || chartType === "pie") && !xField) {
+    if ((chartType === "bar" || chartType === "line" || chartType === "area" || chartType === "pie" || chartType === "scatter") && !xField) {
       setError("This chart type needs an x-axis column");
       return;
     }
-    if (aggregation !== "count" && !yField) {
+    if (chartType === "scatter" && !yField) {
+      setError("Scatter charts need a y-axis column");
+      return;
+    }
+    if (chartType !== "scatter" && aggregation !== "count" && !yField) {
       setError(`"${aggregation}" needs a column to aggregate`);
       return;
     }
@@ -61,8 +68,11 @@ export function WidgetForm({ onCancel, onSaved, editingWidget }: Props) {
       table,
       chartType,
       xField: xField || undefined,
+      xField2: chartType === "table" && xField ? xField2 || undefined : undefined,
       yField: yField || undefined,
       aggregation,
+      filters: filters.filter((f) => f.column && f.value) as Widget["filters"],
+      highlightRules: highlightRules.filter((r) => r.color),
     };
 
     setSaving(true);
@@ -134,9 +144,51 @@ export function WidgetForm({ onCancel, onSaved, editingWidget }: Props) {
             </div>
           )}
 
+          {table && (
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Filters (column = value)</label>
+              {filters.map((f, i) => (
+                <div key={i} className="flex gap-1">
+                  <select
+                    value={f.column}
+                    onChange={(e) =>
+                      setFilters(filters.map((x, j) => (j === i ? { ...x, column: e.target.value } : x)))
+                    }
+                    className="h-9 w-1/2 rounded-md border border-input bg-card px-2 text-sm"
+                  >
+                    <option value="">Column…</option>
+                    {columns.map((c) => (
+                      <option key={c.name} value={c.name}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                  <Input
+                    value={f.value}
+                    onChange={(e) =>
+                      setFilters(filters.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))
+                    }
+                    placeholder="Value"
+                    className="w-1/2"
+                  />
+                  <Button variant="ghost" size="sm" onClick={() => setFilters(filters.filter((_, j) => j !== i))}>
+                    ×
+                  </Button>
+                </div>
+              ))}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setFilters([...filters, { column: "", value: "" }])}
+              >
+                + Add filter
+              </Button>
+            </div>
+          )}
+
           <div className="space-y-1">
             <label className="text-xs text-muted-foreground">Chart type</label>
-            <div className="grid grid-cols-5 gap-1 rounded-md bg-muted p-1 text-[11px]">
+            <div className="grid grid-cols-4 gap-1 rounded-md bg-muted p-1 text-[11px]">
               {availableChartTypes.map((ct) => (
                 <button
                   key={ct}
@@ -149,14 +201,87 @@ export function WidgetForm({ onCancel, onSaved, editingWidget }: Props) {
             </div>
           </div>
 
-          {table && chartType !== "table" && (
-            <>
-              {chartType !== "number" && (
+          {table && chartType !== "number" && (
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">
+                {chartType === "table" ? "Row grouping (optional)" : chartType === "scatter" ? "X-axis" : "X-axis (group by)"}
+              </label>
+              <select
+                value={xField}
+                onChange={(e) => {
+                  setXField(e.target.value);
+                  if (!e.target.value) setXField2("");
+                }}
+                className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm"
+              >
+                <option value="">{chartType === "table" ? "None — raw rows" : "Select…"}</option>
+                {columns.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {table && chartType === "table" && xField && (
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Column grouping (optional — makes a pivot table)</label>
+              <select
+                value={xField2}
+                onChange={(e) => setXField2(e.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm"
+              >
+                <option value="">None</option>
+                {columns.filter((c) => c.name !== xField).map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {table && chartType === "scatter" && (
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Y-axis</label>
+              <select
+                value={yField}
+                onChange={(e) => setYField(e.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm"
+              >
+                <option value="">Select…</option>
+                {columns.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {table && chartType !== "scatter" && (chartType !== "table" || xField) && (
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Aggregation</label>
+                <select
+                  value={aggregation}
+                  onChange={(e) => setAggregation(e.target.value as Widget["aggregation"])}
+                  className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm capitalize"
+                >
+                  {AGGREGATIONS.map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {aggregation !== "count" && (
                 <div className="space-y-1">
-                  <label className="text-xs text-muted-foreground">X-axis (group by)</label>
+                  <label className="text-xs text-muted-foreground">Y-axis (aggregate)</label>
                   <select
-                    value={xField}
-                    onChange={(e) => setXField(e.target.value)}
+                    value={yField}
+                    onChange={(e) => setYField(e.target.value)}
                     className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm"
                   >
                     <option value="">Select…</option>
@@ -168,41 +293,59 @@ export function WidgetForm({ onCancel, onSaved, editingWidget }: Props) {
                   </select>
                 </div>
               )}
+            </div>
+          )}
 
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-1">
-                  <label className="text-xs text-muted-foreground">Aggregation</label>
+          {table && (chartType === "number" || chartType === "table") && (
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Conditional highlighting</label>
+              {highlightRules.map((r, i) => (
+                <div key={i} className="flex gap-1">
                   <select
-                    value={aggregation}
-                    onChange={(e) => setAggregation(e.target.value as Widget["aggregation"])}
-                    className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm capitalize"
+                    value={r.operator}
+                    onChange={(e) =>
+                      setHighlightRules(
+                        highlightRules.map((x, j) => (j === i ? { ...x, operator: e.target.value as HighlightRule["operator"] } : x))
+                      )
+                    }
+                    className="h-9 rounded-md border border-input bg-card px-1 text-sm"
                   >
-                    {AGGREGATIONS.map((a) => (
-                      <option key={a} value={a}>
-                        {a}
-                      </option>
-                    ))}
+                    <option value="gt">{">"}</option>
+                    <option value="gte">{"≥"}</option>
+                    <option value="lt">{"<"}</option>
+                    <option value="lte">{"≤"}</option>
+                    <option value="eq">{"="}</option>
                   </select>
+                  <Input
+                    type="number"
+                    value={r.value}
+                    onChange={(e) =>
+                      setHighlightRules(highlightRules.map((x, j) => (j === i ? { ...x, value: Number(e.target.value) } : x)))
+                    }
+                    placeholder="Threshold"
+                    className="flex-1"
+                  />
+                  <input
+                    type="color"
+                    value={r.color || "#f87171"}
+                    onChange={(e) =>
+                      setHighlightRules(highlightRules.map((x, j) => (j === i ? { ...x, color: e.target.value } : x)))
+                    }
+                    className="h-9 w-9 rounded-md border border-input bg-card"
+                  />
+                  <Button variant="ghost" size="sm" onClick={() => setHighlightRules(highlightRules.filter((_, j) => j !== i))}>
+                    ×
+                  </Button>
                 </div>
-                {aggregation !== "count" && (
-                  <div className="space-y-1">
-                    <label className="text-xs text-muted-foreground">Y-axis (aggregate)</label>
-                    <select
-                      value={yField}
-                      onChange={(e) => setYField(e.target.value)}
-                      className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm"
-                    >
-                      <option value="">Select…</option>
-                      {columns.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-              </div>
-            </>
+              ))}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setHighlightRules([...highlightRules, { operator: "gt", value: 0, color: "#f87171" }])}
+              >
+                + Add rule
+              </Button>
+            </div>
           )}
 
           {error && (

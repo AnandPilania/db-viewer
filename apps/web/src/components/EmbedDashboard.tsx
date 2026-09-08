@@ -2,12 +2,13 @@ import { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Radio } from "lucide-react";
 import { ChartRenderer } from "@/components/ChartRenderer";
-import type { WidgetData } from "@/lib/api";
+import type { HighlightRule, WidgetData } from "@/lib/api";
 
 interface PublicWidget {
   id: string;
   title: string;
-  chartType: "bar" | "line" | "pie" | "number" | "table";
+  chartType: "bar" | "line" | "area" | "scatter" | "pie" | "number" | "table";
+  highlightRules?: HighlightRule[];
   layout: { x: number; y: number; w: number; h: number };
 }
 
@@ -89,7 +90,7 @@ function EmbedWidget({ dashboardId, token, widget }: { dashboardId: string; toke
       <div className="flex-1 overflow-hidden p-2">
         {isLoading && <div className="flex h-full items-center justify-center text-xs text-muted-foreground">Loading…</div>}
         {error && <div className="flex h-full items-center justify-center text-xs text-destructive">{(error as Error).message}</div>}
-        {data && <ChartRenderer chartType={widget.chartType} data={data} />}
+        {data && <ChartRenderer chartType={widget.chartType} data={data} highlightRules={widget.highlightRules} />}
       </div>
     </div>
   );

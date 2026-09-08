@@ -103,17 +103,28 @@ export const api = {
         }),
 };
 
+export interface HighlightRule {
+    /** Cell/value key to test — "y" for any aggregated value, or a raw column name for an ungrouped table. Omit to match the widget's primary value wherever it appears. */
+    column?: string;
+    operator: "gt" | "gte" | "lt" | "lte" | "eq";
+    value: number;
+    color: string;
+}
+
 export interface Widget {
     id: string;
     title: string;
     connectionId: string;
     schema?: string;
     table: string;
-    chartType: "bar" | "line" | "pie" | "number" | "table";
+    chartType: "bar" | "line" | "area" | "scatter" | "pie" | "number" | "table";
     xField?: string;
+    /** Second group-by column — only meaningful for a "table" widget with xField set, turning it into a row × column pivot. */
+    xField2?: string;
     yField?: string;
     aggregation: "count" | "sum" | "avg" | "min" | "max";
     filters?: { column: string; value: string }[];
+    highlightRules?: HighlightRule[];
     createdAt: string;
 }
 
@@ -121,6 +132,7 @@ export interface WidgetData {
     rows: Record<string, unknown>[];
     xKey: string;
     yKey: string;
+    x2Key?: string;
 }
 
 export interface DashboardLayoutItem {

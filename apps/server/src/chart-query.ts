@@ -32,6 +32,8 @@ export interface WidgetData {
     rows: Record<string, unknown>[];
     xKey: string;
     yKey: string;
+    /** Set only for a "table" widget with both xField and xField2 — signals a row × column pivot, keyed by this field, rather than a flat grouped list. */
+    x2Key?: string;
 }
 
 /**
@@ -59,7 +61,7 @@ export async function fetchWidgetData(
     if (!tableDef) throw new Error(`Table "${widget.table}" not found`);
     const validColumns = new Set(tableDef.columns.map((c) => c.name));
 
-    for (const field of [widget.xField, widget.yField, ...(widget.filters ?? []).map((f) => f.column)]) {
+    for (const field of [widget.xField, widget.xField2, widget.yField, ...(widget.filters ?? []).map((f) => f.column)]) {
         if (field && !validColumns.has(field)) throw new Error(`Column "${field}" does not exist on ${widget.table}`);
     }
 
@@ -79,22 +81,44 @@ export async function fetchWidgetData(
     }
     const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
 
-    if (widget.chartType === "table") {
-        const rows = await collectRows(conn, { language: "sql", sql: `SELECT * FROM ${tableRef} ${whereSql} LIMIT 50`, params });
-        return { rows, xKey: "", yKey: "" };
-    }
-
     const yExpr =
         widget.aggregation === "count"
             ? "COUNT(*)"
             : `${widget.aggregation.toUpperCase()}(${quoteIdent(driver, widget.yField!)})`;
+
+    if (widget.chartType === "table") {
+        if (!widget.xField) {
+            const rows = await collectRows(conn, { language: "sql", sql: `SELECT * FROM ${tableRef} ${whereSql} LIMIT 50`, params });
+            return { rows, xKey: "", yKey: "" };
+        }
+        // Grouped summary (Salesforce-style row grouping), or a row × column pivot when xField2 is also set.
+        const xIdent = quoteIdent(driver, widget.xField);
+        const groupCols = [xIdent];
+        const selectCols = [`${xIdent} AS x`];
+        if (widget.xField2) {
+            const x2Ident = quoteIdent(driver, widget.xField2);
+            groupCols.push(x2Ident);
+            selectCols.push(`${x2Ident} AS x2`);
+        }
+        const sql = `SELECT ${selectCols.join(", ")}, ${yExpr} AS y FROM ${tableRef} ${whereSql} GROUP BY ${groupCols.join(", ")} ORDER BY ${groupCols.join(", ")} LIMIT 500`;
+        const rows = await collectRows(conn, { language: "sql", sql, params });
+        return { rows, xKey: "x", yKey: "y", x2Key: widget.xField2 ? "x2" : undefined };
+    }
 
     if (widget.chartType === "number") {
         const rows = await collectRows(conn, { language: "sql", sql: `SELECT ${yExpr} AS y FROM ${tableRef} ${whereSql}`, params });
         return { rows, xKey: "", yKey: "y" };
     }
 
-    // bar / line / pie — grouped aggregation
+    if (widget.chartType === "scatter") {
+        // Raw (x, y) pairs, not aggregated — unlike bar/line/area, a scatter plot shows every row.
+        if (!widget.xField || !widget.yField) throw new Error("Scatter charts need both an x and y column");
+        const sql = `SELECT ${quoteIdent(driver, widget.xField)} AS x, ${quoteIdent(driver, widget.yField)} AS y FROM ${tableRef} ${whereSql} LIMIT 500`;
+        const rows = await collectRows(conn, { language: "sql", sql, params });
+        return { rows, xKey: "x", yKey: "y" };
+    }
+
+    // bar / line / area / pie — grouped aggregation
     if (!widget.xField) throw new Error(`${widget.chartType} charts need an x-axis column`);
     const xIdent = quoteIdent(driver, widget.xField);
     const sql = `SELECT ${xIdent} AS x, ${yExpr} AS y FROM ${tableRef} ${whereSql} GROUP BY ${xIdent} ORDER BY y DESC LIMIT 50`;
@@ -115,23 +139,34 @@ async function fetchMongoWidgetData(conn: DriverConnection, widget: Widget): Pro
     if (!collDef) throw new Error(`Collection "${widget.table}" not found`);
     const validFields = new Set(collDef.columns.map((c) => c.name));
 
-    for (const field of [widget.xField, widget.yField, ...(widget.filters ?? []).map((f) => f.column)]) {
+    for (const field of [widget.xField, widget.xField2, widget.yField, ...(widget.filters ?? []).map((f) => f.column)]) {
         if (field && !validFields.has(field)) throw new Error(`Field "${field}" does not exist on ${widget.table}`);
     }
 
     const match: Record<string, unknown> = {};
     for (const f of widget.filters ?? []) match[f.column] = f.value;
 
-    if (widget.chartType === "table") {
-        const rows = await collectRows(conn, { language: "mongo", collection: widget.table, filter: match, limit: 50 });
-        return { rows, xKey: "", yKey: "" };
-    }
-
     const accumulator =
         widget.aggregation === "count" ? { $sum: 1 } : { [`$${widget.aggregation}`]: `$${widget.yField}` };
 
     const pipeline: Record<string, unknown>[] = [];
     if (Object.keys(match).length) pipeline.push({ $match: match });
+
+    if (widget.chartType === "table") {
+        if (!widget.xField) {
+            const rows = await collectRows(conn, { language: "mongo", collection: widget.table, filter: match, limit: 50 });
+            return { rows, xKey: "", yKey: "" };
+        }
+        // Grouped summary, or a row × column pivot when xField2 is also set — same shape the SQL path produces.
+        const groupId: Record<string, unknown> = { x: `$${widget.xField}` };
+        if (widget.xField2) groupId.x2 = `$${widget.xField2}`;
+        pipeline.push({ $group: { _id: groupId, y: accumulator } });
+        pipeline.push({ $sort: { "_id.x": 1, "_id.x2": 1 } });
+        pipeline.push({ $limit: 500 });
+        pipeline.push({ $project: { x: "$_id.x", ...(widget.xField2 ? { x2: "$_id.x2" } : {}), y: 1, _id: 0 } });
+        const rows = await collectRows(conn, { language: "mongo", collection: widget.table, pipeline });
+        return { rows, xKey: "x", yKey: "y", x2Key: widget.xField2 ? "x2" : undefined };
+    }
 
     if (widget.chartType === "number") {
         pipeline.push({ $group: { _id: null, y: accumulator } });
@@ -140,7 +175,16 @@ async function fetchMongoWidgetData(conn: DriverConnection, widget: Widget): Pro
         return { rows, xKey: "", yKey: "y" };
     }
 
-    // bar / line / pie — grouped aggregation
+    if (widget.chartType === "scatter") {
+        // Raw (x, y) pairs, not aggregated — unlike bar/line/area, a scatter plot shows every document.
+        if (!widget.xField || !widget.yField) throw new Error("Scatter charts need both an x and y column");
+        pipeline.push({ $project: { x: `$${widget.xField}`, y: `$${widget.yField}`, _id: 0 } });
+        pipeline.push({ $limit: 500 });
+        const rows = await collectRows(conn, { language: "mongo", collection: widget.table, pipeline });
+        return { rows, xKey: "x", yKey: "y" };
+    }
+
+    // bar / line / area / pie — grouped aggregation
     if (!widget.xField) throw new Error(`${widget.chartType} charts need an x-axis column`);
     pipeline.push({ $group: { _id: `$${widget.xField}`, y: accumulator } });
     pipeline.push({ $sort: { y: -1 } });

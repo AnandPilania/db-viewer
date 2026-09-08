@@ -102,7 +102,7 @@ export async function dashboardRoutes(app: FastifyInstance) {
           // Strip connection details from the public payload — the client
           // never needs (or gets) connectionId/schema/table, only what's
           // needed to render the chart shell before data arrives.
-          return { id: w.id, title: w.title, chartType: w.chartType, layout: item };
+          return { id: w.id, title: w.title, chartType: w.chartType, highlightRules: w.highlightRules, layout: item };
         } catch {
           return null;
         }

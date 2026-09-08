@@ -16,6 +16,7 @@ interface Props {
   /** When provided, the widget refetches instantly on any change to this table instead of waiting for the poll interval. */
   connectionId?: string;
   table?: string;
+  highlightRules?: Widget["highlightRules"];
 }
 
 export function WidgetCard({
@@ -28,6 +29,7 @@ export function WidgetCard({
   dragHandleClassName,
   connectionId,
   table,
+  highlightRules,
 }: Props) {
   const queryClient = useQueryClient();
   const queryKey = ["widget-data", id];
@@ -86,7 +88,7 @@ export function WidgetCard({
       <div className="flex-1 overflow-hidden p-2">
         {isLoading && <div className="flex h-full items-center justify-center text-xs text-muted-foreground">Loading…</div>}
         {error && <div className="flex h-full items-center justify-center text-xs text-destructive">{(error as Error).message}</div>}
-        {data && <ChartRenderer chartType={chartType} data={data} />}
+        {data && <ChartRenderer chartType={chartType} data={data} highlightRules={highlightRules} />}
       </div>
     </div>
   );
