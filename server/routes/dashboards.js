@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { dashboardStore } from "../dashboard-store.js";
 import { widgetStore } from "../widget-store.js";
 import { connectionStore } from "../connection-store.js";
@@ -9,6 +10,12 @@ import { fetchWidgetData } from "../chart-query.js";
  * accept no free-form SQL, table, or column input from the caller. An
  * embed link can only show what its creator configured, nothing else.
  */
+/** Constant-time compare so a wrong token leaks nothing through response timing. */
+function tokenMatches(supplied, expected) {
+    if (typeof supplied !== "string" || supplied.length !== expected.length)
+        return false;
+    return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+}
 export function authorizeEmbed(dashboardId, token) {
     let dashboard;
     try {
@@ -20,7 +27,7 @@ export function authorizeEmbed(dashboardId, token) {
     if (!dashboard.embedEnabled || !dashboard.shareToken) {
         return { ok: false, status: 403, error: "Embedding is not enabled for this dashboard" };
     }
-    if (token !== dashboard.shareToken) {
+    if (!tokenMatches(token, dashboard.shareToken)) {
         return { ok: false, status: 403, error: "Invalid or missing embed token" };
     }
     return { ok: true };
@@ -94,7 +101,7 @@ export async function dashboardRoutes(app) {
                 // Strip connection details from the public payload — the client
                 // never needs (or gets) connectionId/schema/table, only what's
                 // needed to render the chart shell before data arrives.
-                return { id: w.id, title: w.title, chartType: w.chartType, layout: item };
+                return { id: w.id, title: w.title, chartType: w.chartType, highlightRules: w.highlightRules, layout: item };
             }
             catch {
                 return null;

@@ -1,6 +1,6 @@
 {
   "name": "@pilaniaanand/db-viewer",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Browse and query Postgres, MySQL, SQLite, MongoDB, Redis, and ClickHouse from one local web UI.",
   "type": "module",
   "engines": {

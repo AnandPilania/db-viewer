@@ -29,45 +29,55 @@ class TableEventBus extends EventEmitter {
 }
 export const tableEvents = new TableEventBus();
 tableEvents.setMaxListeners(0); // unbounded — many browser tabs may watch the same table
-// Refcounted so we only open one native change stream/listener per
-// (connection, table) no matter how many subscribers (browser tabs, embed
-// viewers) are watching it, and close it the moment nobody is.
 const nativeWatchers = new Map();
 export async function ensureNativeWatch(connectionId, table) {
     const key = `${connectionId}::${table}`;
     const existing = nativeWatchers.get(key);
     if (existing) {
         existing.count++;
+        await existing.ready;
         return;
     }
+    const entry = {
+        count: 1,
+        ready: (async () => {
+            const conn = await connectionStore.getLive(connectionId);
+            if (!conn.watchTable)
+                return null; // driver doesn't support native watching
+            const stop = conn.watchTable(table, undefined, (event) => {
+                try {
+                    tableEvents.publish(connectionId, table, event);
+                }
+                catch (err) {
+                    logger.error({ err, connectionId, table }, "Native-watch callback failed");
+                }
+            });
+            return { stop };
+        })(),
+    };
+    nativeWatchers.set(key, entry);
     try {
-        const conn = await connectionStore.getLive(connectionId);
-        if (!conn.watchTable)
-            return; // driver doesn't support native watching
-        const stop = conn.watchTable(table, undefined, (event) => {
-            try {
-                tableEvents.publish(connectionId, table, event);
-            }
-            catch (err) {
-                logger.error({ err, connectionId, table }, "Native-watch callback failed");
-            }
-        });
-        nativeWatchers.set(key, { count: 1, stop });
+        await entry.ready;
     }
     catch (err) {
-        // Connection not available yet — app-originated events still work via tableEvents.
+        // Connection not available yet — app-originated events still work via
+        // tableEvents. Drop the entry so a later subscriber retries instead of
+        // inheriting a permanently-failed watcher.
+        if (nativeWatchers.get(key) === entry)
+            nativeWatchers.delete(key);
         logger.warn({ err, connectionId, table }, "Could not start native table watch");
     }
 }
 export function releaseNativeWatch(connectionId, table) {
     const key = `${connectionId}::${table}`;
-    const existing = nativeWatchers.get(key);
-    if (!existing)
+    const entry = nativeWatchers.get(key);
+    if (!entry)
         return;
-    existing.count--;
-    if (existing.count <= 0) {
-        existing.stop();
-        nativeWatchers.delete(key);
-    }
+    entry.count--;
+    if (entry.count > 0)
+        return;
+    nativeWatchers.delete(key);
+    // The handle may still be in flight; stop it once it lands either way.
+    entry.ready.then((handle) => handle?.stop()).catch(() => { });
 }
 //# sourceMappingURL=table-events.js.map

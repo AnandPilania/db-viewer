@@ -57,7 +57,16 @@ app.get("/api/health", async () => ({ ok: true }));
 // actually found (see the plugin for details).
 await app.register(staticFrontendPlugin);
 const port = Number(process.env.PORT ?? 4000);
-app.listen({ port, host: "0.0.0.0" }).catch((err) => {
+// Loopback by default. This process holds decrypted credentials for every
+// configured database and has no authentication of its own, so binding all
+// interfaces made it reachable by anything on the network. HOST=0.0.0.0 is
+// still available for container/remote use, where putting real auth in front
+// of it is the operator's job.
+const host = process.env.HOST ?? "127.0.0.1";
+if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+    app.log.warn(`Listening on ${host} — this API has no authentication and holds credentials for every configured database. Put a reverse proxy with auth in front of it.`);
+}
+app.listen({ port, host }).catch((err) => {
     app.log.error(err);
     process.exit(1);
 });

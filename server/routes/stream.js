@@ -36,7 +36,12 @@ export async function streamRoutes(app) {
                     socket.send(JSON.stringify({ type: "error", message: 'Missing or invalid "query" in run message' }));
                     return;
                 }
+                // A second "run" on the same socket used to overwrite this
+                // without aborting the first, orphaning a server-side query
+                // that kept streaming into a socket nobody was reading for it.
+                controller?.abort();
                 controller = new AbortController();
+                const runController = controller;
                 const start = performance.now();
                 try {
                     // streamQuery's "sql" shape can carry a write statement just as
@@ -50,12 +55,16 @@ export async function streamRoutes(app) {
                         }
                     }
                     const conn = await connectionStore.getLive(id);
-                    for await (const chunk of conn.streamQuery({ query, signal: controller.signal })) {
-                        if (controller.signal.aborted)
+                    for await (const chunk of conn.streamQuery({ query, signal: runController.signal })) {
+                        if (runController.signal.aborted)
+                            break;
+                        if (socket.readyState !== socket.OPEN)
                             break;
                         socket.send(JSON.stringify({ type: "chunk", rows: chunk.rows, columns: chunk.columns }));
                     }
-                    if (!controller.signal.aborted) {
+                    if (socket.readyState !== socket.OPEN)
+                        return;
+                    if (!runController.signal.aborted) {
                         socket.send(JSON.stringify({ type: "done", durationMs: performance.now() - start }));
                     }
                     else {
@@ -63,7 +72,9 @@ export async function streamRoutes(app) {
                     }
                 }
                 catch (err) {
-                    socket.send(JSON.stringify({ type: "error", message: err.message }));
+                    if (socket.readyState === socket.OPEN) {
+                        socket.send(JSON.stringify({ type: "error", message: err.message }));
+                    }
                 }
             }
         });

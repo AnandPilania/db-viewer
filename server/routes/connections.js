@@ -2,6 +2,19 @@ import { connectionStore } from "../connection-store.js";
 import { registry } from "../registry.js";
 import { tableEvents } from "../table-events.js";
 import { assertWritable, assertExecutable, ReadOnlyError } from "../read-only.js";
+/**
+ * An unbounded pageSize is an out-of-memory switch reachable by anyone who
+ * can POST — the driver would build one array of that many rows before the
+ * route ever sees them. The grid asks for 200 and export asks for 1000.
+ */
+const MAX_PAGE_SIZE = 5000;
+const DEFAULT_PAGE_SIZE = 100;
+function clampPageSize(raw) {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 1)
+        return DEFAULT_PAGE_SIZE;
+    return Math.min(Math.floor(n), MAX_PAGE_SIZE);
+}
 /** ReadOnlyError -> 403; everything else (driver/validation errors) -> 400, as every route already did. */
 function sendError(reply, err) {
     reply.code(err instanceof ReadOnlyError ? 403 : 400);
@@ -72,9 +85,10 @@ export async function connectionRoutes(app) {
                 schema: body.schema,
                 columns: body.columns,
                 filters: body.filters,
-                sort: body.sort,
-                pageSize: body.pageSize ?? 100,
+                sort: Array.isArray(body.sort) ? body.sort : undefined,
+                pageSize: clampPageSize(body.pageSize),
                 afterCursor: body.afterCursor ?? null,
+                seek: Array.isArray(body.seek) ? body.seek : null,
                 signal: controller.signal,
             });
         }

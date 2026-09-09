@@ -1,12 +1,12 @@
 import { widgetStore } from "../widget-store.js";
 import { connectionStore } from "../connection-store.js";
 import { fetchWidgetData } from "../chart-query.js";
+import { validateWidgetInput, validateWidgetPatch } from "../widget-validation.js";
 export async function widgetRoutes(app) {
     app.get("/api/widgets", async () => widgetStore.list());
     app.post("/api/widgets", async (req, reply) => {
-        const body = req.body;
         try {
-            return widgetStore.create(body);
+            return widgetStore.create(validateWidgetInput(req.body));
         }
         catch (err) {
             reply.code(400);
@@ -16,7 +16,7 @@ export async function widgetRoutes(app) {
     app.patch("/api/widgets/:id", async (req, reply) => {
         const { id } = req.params;
         try {
-            return widgetStore.update(id, req.body);
+            return widgetStore.update(id, validateWidgetPatch(widgetStore.get(id), req.body));
         }
         catch (err) {
             reply.code(400);

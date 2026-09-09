@@ -132,7 +132,13 @@ class ConnectionStore {
             throw new Error(`Unknown connection "${id}"`);
         if (!entry.live) {
             const driver = registry.get(entry.config.driver);
-            entry.live = await driver.connect(await this.withTunnel(entry.config));
+            entry.live = (async () => driver.connect(await this.withTunnel(entry.config)))();
+            // A failed connect must not be cached, or the connection is
+            // permanently broken until restart.
+            entry.live.catch(() => {
+                if (this.connections.get(id) === entry)
+                    entry.live = undefined;
+            });
         }
         return entry.live;
     }
@@ -141,7 +147,7 @@ class ConnectionStore {
         if (!entry)
             return;
         if (entry.live)
-            await entry.live.close();
+            await entry.live.then((c) => c.close()).catch(() => { });
         this.closeTunnel(id);
         this.connections.delete(id);
         this.saveToDisk();
@@ -150,7 +156,7 @@ class ConnectionStore {
     async closeAll() {
         const closes = [...this.connections.values()]
             .filter((entry) => entry.live)
-            .map((entry) => entry.live.close().catch(() => { }));
+            .map((entry) => entry.live.then((c) => c.close()).catch(() => { }));
         await Promise.all(closes);
         for (const id of [...this.tunnels.keys()])
             this.closeTunnel(id);

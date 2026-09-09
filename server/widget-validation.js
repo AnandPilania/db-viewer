@@ -1,0 +1,120 @@
+import { assertSafeIdentifier } from "@pilaniaanand/driver-interface";
+/**
+ * Runtime validation for widget input.
+ *
+ * The routes used to cast `req.body` straight to `Widget` and store it. The
+ * TypeScript types are erased at runtime, so nothing checked these fields —
+ * and `chart-query.ts` interpolates two of them directly into SQL:
+ * `aggregation` (as `${agg.toUpperCase()}(col)`) and `schema` (through
+ * quoteIdent, which quotes but does not escape). Column and table names were
+ * already allowlisted against the live schema; these two were not, which made
+ * a saved widget an arbitrary-SQL vehicle.
+ *
+ * Everything that reaches SQL is checked against a closed set here, so
+ * chart-query only ever concatenates values this module has approved.
+ */
+const CHART_TYPES = new Set(["bar", "line", "area", "scatter", "pie", "number", "table"]);
+const AGGREGATIONS = new Set(["count", "sum", "avg", "min", "max"]);
+const HIGHLIGHT_OPS = new Set(["gt", "gte", "lt", "lte", "eq"]);
+/** Blocks `expression(...)` / `url(...)` / escapes in a CSS color that lands in a style attribute. */
+const SAFE_CSS_COLOR = /^(#[0-9a-fA-F]{3,8}|[a-zA-Z]+|rgba?\([\d\s.,%]+\)|hsla?\([\d\s.,%deg]+\))$/;
+function str(value, field, { required = false } = {}) {
+    if (value === undefined || value === null || value === "") {
+        if (required)
+            throw new Error(`${field} is required`);
+        return undefined;
+    }
+    if (typeof value !== "string")
+        throw new Error(`${field} must be a string`);
+    return value;
+}
+function validateHighlightRules(raw) {
+    if (raw === undefined || raw === null)
+        return undefined;
+    if (!Array.isArray(raw))
+        throw new Error("highlightRules must be an array");
+    return raw.map((r, i) => {
+        const rule = r;
+        const operator = rule.operator;
+        if (!HIGHLIGHT_OPS.has(operator)) {
+            throw new Error(`highlightRules[${i}].operator must be one of: ${[...HIGHLIGHT_OPS].join(", ")}`);
+        }
+        if (typeof rule.value !== "number" || !Number.isFinite(rule.value)) {
+            throw new Error(`highlightRules[${i}].value must be a finite number`);
+        }
+        const color = str(rule.color, `highlightRules[${i}].color`, { required: true });
+        if (!SAFE_CSS_COLOR.test(color))
+            throw new Error(`highlightRules[${i}].color is not a valid CSS color`);
+        const column = str(rule.column, `highlightRules[${i}].column`);
+        if (column !== undefined)
+            assertSafeIdentifier(column, "highlight column");
+        return { column, operator, value: rule.value, color };
+    });
+}
+export function validateWidgetInput(raw) {
+    if (!raw || typeof raw !== "object")
+        throw new Error("Request body must be a widget object");
+    const body = raw;
+    const chartType = body.chartType;
+    if (!CHART_TYPES.has(chartType))
+        throw new Error(`chartType must be one of: ${[...CHART_TYPES].join(", ")}`);
+    const aggregation = body.aggregation;
+    if (!AGGREGATIONS.has(aggregation))
+        throw new Error(`aggregation must be one of: ${[...AGGREGATIONS].join(", ")}`);
+    const table = str(body.table, "table", { required: true });
+    assertSafeIdentifier(table, "table");
+    const schema = str(body.schema, "schema");
+    if (schema !== undefined)
+        assertSafeIdentifier(schema, "schema");
+    // Column names are re-checked against the live schema in chart-query, but
+    // the charset check has to happen before they are ever stored.
+    const fields = {
+        xField: str(body.xField, "xField"),
+        xField2: str(body.xField2, "xField2"),
+        yField: str(body.yField, "yField"),
+    };
+    for (const [name, value] of Object.entries(fields)) {
+        if (value !== undefined)
+            assertSafeIdentifier(value, name);
+    }
+    if (aggregation !== "count" && chartType !== "table" && !fields.yField) {
+        throw new Error(`aggregation "${aggregation}" needs a yField`);
+    }
+    let filters;
+    if (body.filters !== undefined && body.filters !== null) {
+        if (!Array.isArray(body.filters))
+            throw new Error("filters must be an array");
+        filters = body.filters.map((f, i) => {
+            const filter = f;
+            const column = str(filter.column, `filters[${i}].column`, { required: true });
+            assertSafeIdentifier(column, "filter column");
+            // Values are bound as parameters (or escaped as literals for
+            // ClickHouse), so any string is fine — but it must be a string,
+            // not an object that would confuse the driver's binder.
+            const value = filter.value;
+            if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+                throw new Error(`filters[${i}].value must be a string, number, or boolean`);
+            }
+            return { column, value: String(value) };
+        });
+    }
+    return {
+        title: str(body.title, "title", { required: true }).slice(0, 200),
+        connectionId: str(body.connectionId, "connectionId", { required: true }),
+        schema,
+        table,
+        chartType,
+        ...fields,
+        aggregation,
+        filters,
+        highlightRules: validateHighlightRules(body.highlightRules),
+    };
+}
+/** PATCH bodies are partial — validate the merged result so a patch can't sneak a bad field past the full check. */
+export function validateWidgetPatch(existing, patch) {
+    if (!patch || typeof patch !== "object")
+        throw new Error("Request body must be a widget patch object");
+    const { id: _id, createdAt: _createdAt, ...rest } = { ...existing, ...patch };
+    return validateWidgetInput(rest);
+}
+//# sourceMappingURL=widget-validation.js.map

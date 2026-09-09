@@ -1,9 +1,11 @@
-import type { ConnectionConfig, DriverConnection } from "@pilaniaanand/driver-interface";
+import { type ConnectionConfig, type DriverConnection } from "@pilaniaanand/driver-interface";
 import type { Widget } from "./models.js";
 export interface WidgetData {
     rows: Record<string, unknown>[];
     xKey: string;
     yKey: string;
+    /** Set only for a "table" widget with both xField and xField2 — signals a row × column pivot, keyed by this field, rather than a flat grouped list. */
+    x2Key?: string;
 }
 /**
  * Builds and runs the SQL for a widget's chart, validating every column
