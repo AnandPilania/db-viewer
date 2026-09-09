@@ -1,21 +1,32 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { flexRender } from "@tanstack/react-table";
-// react-table v9's default API (`useTable`) is a full rewrite around pluggable
-// "features" — `/legacy` is the officially shipped v8-compatible surface for
-// exactly this usage (core row model only, no sorting/filtering/pagination).
-import { getCoreRowModel, useLegacyTable, type LegacyColumnDef } from "@tanstack/react-table/legacy";
 import type { ColumnDefinition } from "@pilaniaanand/driver-interface";
-import { Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { validateValue, placeholderFor } from "@/lib/validation";
+
+export interface GridSort {
+  column: string;
+  direction: "asc" | "desc";
+}
 
 interface Props {
   columns: ColumnDefinition[];
   rows: Record<string, unknown>[];
+  /** First page of a new table/sort/jump — renders a skeleton rather than an empty grid. */
+  initialLoading?: boolean;
   loading: boolean;
   hasMore: boolean;
   onNeedMore: () => void;
+  /** Current sort, and a setter. Clicking a header cycles asc -> desc -> unsorted. */
+  sort?: GridSort | null;
+  onSortChange?: (sort: GridSort | null) => void;
+  /**
+   * Absolute row number of the first resident row, for the row-number gutter.
+   * null means unknown — the user jumped to a value, and a keyset seek says
+   * where a value is, not how many rows precede it.
+   */
+  windowStartRow?: number | null;
   /** If provided, cells become editable (double-click or Enter to edit). Returning false/rejecting keeps the cell in edit mode with the error shown. */
   onEditCell?: (rowIndex: number, column: ColumnDefinition, value: unknown) => Promise<boolean>;
   /** If provided, each row gets a delete button, and Delete/Backspace on a focused row triggers it too. */
@@ -24,111 +35,117 @@ interface Props {
 
 const ROW_HEIGHT = 32;
 const FETCH_THRESHOLD_PX = 600;
+const CHAR_PX = 7; // ~1ch of the grid's 12px monospace face
+const MIN_COL_PX = 80;
+const MAX_COL_PX = 420;
+const WIDTH_SAMPLE_ROWS = 50;
 
-export function DataGrid({ columns, rows, loading, hasMore, onNeedMore, onEditCell, onDeleteRow }: Props) {
+/**
+ * Column widths, measured once per column set from a sample of the first
+ * page rather than left to the browser.
+ *
+ * With `table-layout: auto` (the default) plus `whitespace-nowrap`, the
+ * browser re-measures every cell in the table to lay out the widest column
+ * — and it redoes that whole pass each time a 200-row batch is appended.
+ * Fixed layout plus explicit widths makes appending a batch cost only the
+ * rows in that batch.
+ */
+function measureColumnWidths(columns: ColumnDefinition[], sample: Record<string, unknown>[]): number[] {
+  return columns.map((col) => {
+    let widest = col.name.length;
+    for (const row of sample) {
+      const len = formatCell(row[col.name]).length;
+      if (len > widest) widest = len;
+    }
+    return Math.min(MAX_COL_PX, Math.max(MIN_COL_PX, widest * CHAR_PX + 24));
+  });
+}
+
+export function DataGrid({
+  columns,
+  rows,
+  initialLoading = false,
+  loading,
+  hasMore,
+  onNeedMore,
+  sort,
+  onSortChange,
+  windowStartRow = 0,
+  onEditCell,
+  onDeleteRow,
+}: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState<{ rowIndex: number; column: string } | null>(null);
-  const [draft, setDraft] = useState("");
   const [editError, setEditError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [focusedCell, setFocusedCell] = useState<{ row: number; col: number } | null>(null);
 
-  function startEditing(rowIndex: number, col: ColumnDefinition) {
-    if (!onEditCell || col.isPrimaryKey) return;
-    const raw = rows[rowIndex]?.[col.name];
-    setDraft(raw === null || raw === undefined ? "" : String(raw));
-    setEditError(null);
-    setEditing({ rowIndex, column: col.name });
-  }
-
-  const tableColumns: LegacyColumnDef<Record<string, unknown>>[] = columns.map((col, colIndex) => ({
-    accessorKey: col.name,
-    header: col.name,
-    cell: (info) => {
-      const rowIndex = info.row.index;
-      const isEditing = editing?.rowIndex === rowIndex && editing.column === col.name;
-      const isFocused = focusedCell?.row === rowIndex && focusedCell?.col === colIndex;
-
-      if (isEditing) {
-        return (
-          <EditCell
-            column={col}
-            draft={draft}
-            setDraft={setDraft}
-            error={editError}
-            saving={saving}
-            onCancel={() => {
-              setEditing(null);
-              setEditError(null);
-            }}
-            onCommit={async () => {
-              const result = validateValue(draft, col);
-              if (!result.valid) {
-                setEditError(result.error);
-                return;
-              }
-              setSaving(true);
-              setEditError(null);
-              const ok = await onEditCell!(rowIndex, col, result.value);
-              setSaving(false);
-              if (ok) {
-                setEditing(null);
-              } else {
-                setEditError("Save failed — value not updated");
-              }
-            }}
-          />
-        );
-      }
-
-      return (
-        <div
-          role="gridcell"
-          data-cell={`${rowIndex}-${colIndex}`}
-          tabIndex={isFocused ? 0 : -1}
-          aria-readonly={!onEditCell || col.isPrimaryKey}
-          className={cn(
-            "truncate outline-none",
-            onEditCell && !col.isPrimaryKey && "cursor-text hover:bg-accent/10",
-            isFocused && "ring-1 ring-inset ring-accent"
-          )}
-          onFocus={() => setFocusedCell({ row: rowIndex, col: colIndex })}
-          onClick={() => setFocusedCell({ row: rowIndex, col: colIndex })}
-          onDoubleClick={() => startEditing(rowIndex, col)}
-        >
-          {formatCell(info.getValue())}
-        </div>
-      );
+  // ponytail: rendered directly instead of through @tanstack/react-table. Only
+  // the core row model was ever used (no sorting/filtering/pagination), and
+  // rebuilding it invalidated on every render — 753 rows x N columns of work per
+  // scroll frame. rows.map over the ~40 virtualized indices is the whole feature.
+  const startEditing = useCallback(
+    (rowIndex: number, col: ColumnDefinition | undefined) => {
+      if (!col || !onEditCell || col.isPrimaryKey) return;
+      setEditError(null);
+      setEditing({ rowIndex, column: col.name });
     },
-  }));
+    [onEditCell]
+  );
 
-  const table = useLegacyTable({
-    data: rows,
-    columns: tableColumns,
-    getCoreRowModel: getCoreRowModel(),
-  });
+  // Intentionally keyed on the column set and on "has the first page landed
+  // yet", NOT on rows — this must measure once and then hold still. Widths
+  // that keep changing as pages arrive make the grid jump under the user.
+  const hasSample = rows.length > 0;
+  const columnWidths = useMemo(
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    () => measureColumnWidths(columns, rows.slice(0, WIDTH_SAMPLE_ROWS)),
+    [columns, hasSample]
+  );
+  const gutterWidth = 64 + (onDeleteRow ? 28 : 0);
+  const totalWidth = columnWidths.reduce((sum, w) => sum + w, 0) + gutterWidth;
 
-  const tableRows = table.getRowModel().rows;
+  const cycleSort = (column: string) => {
+    if (!onSortChange) return;
+    if (sort?.column !== column) onSortChange({ column, direction: "asc" });
+    else if (sort.direction === "asc") onSortChange({ column, direction: "desc" });
+    else onSortChange(null);
+  };
 
   const virtualizer = useVirtualizer({
-    count: tableRows.length,
+    count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT,
-    overscan: 20,
+    overscan: 12,
   });
+
+  // Read through refs so the listener is attached once per mount rather than
+  // re-attached (and re-fired) on every render — re-firing it used to request
+  // the next page even when the user had not scrolled at all.
+  const needMoreRef = useRef(onNeedMore);
+  needMoreRef.current = onNeedMore;
+  const canFetchRef = useRef({ loading, hasMore });
+  canFetchRef.current = { loading, hasMore };
 
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onScroll = () => {
-      if (loading || !hasMore) return;
-      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      if (distanceFromBottom < FETCH_THRESHOLD_PX) onNeedMore();
+      const { loading: busy, hasMore: more } = canFetchRef.current;
+      if (busy || !more) return;
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < FETCH_THRESHOLD_PX) needMoreRef.current();
     };
-    el.addEventListener("scroll", onScroll);
-    onScroll();
+    el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
-  }, [loading, hasMore, onNeedMore, tableRows.length]);
+  }, []);
+
+  // The very first page arrives shorter than the viewport, so there is nothing
+  // to scroll yet — ask for the next page until the grid actually overflows.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || loading || !hasMore) return;
+    if (el.scrollHeight <= el.clientHeight + FETCH_THRESHOLD_PX) onNeedMore();
+  }, [loading, hasMore, rows.length, onNeedMore]);
 
   // Keyboard navigation: arrow keys move the focused cell (scrolling a
   // virtualized target row into view first if it isn't currently rendered),
@@ -138,12 +155,10 @@ export function DataGrid({ columns, rows, loading, hasMore, onNeedMore, onEditCe
   function onGridKeyDown(e: React.KeyboardEvent) {
     if (!focusedCell || editing) return;
     const { row, col } = focusedCell;
-    const colCount = columns.length;
-    const rowCount = rows.length;
 
     const focusCell = (targetRow: number, targetCol: number) => {
-      const clampedRow = Math.max(0, Math.min(targetRow, rowCount - 1));
-      const clampedCol = Math.max(0, Math.min(targetCol, colCount - 1));
+      const clampedRow = Math.max(0, Math.min(targetRow, rows.length - 1));
+      const clampedCol = Math.max(0, Math.min(targetCol, columns.length - 1));
       setFocusedCell({ row: clampedRow, col: clampedCol });
       virtualizer.scrollToIndex(clampedRow, { align: "auto" });
       requestAnimationFrame(() => {
@@ -184,10 +199,35 @@ export function DataGrid({ columns, rows, loading, hasMore, onNeedMore, onEditCe
     }
   }
 
+  async function commitEdit(rowIndex: number, col: ColumnDefinition, raw: string) {
+    const result = validateValue(raw, col);
+    if (!result.valid) {
+      setEditError(result.error);
+      return;
+    }
+    setSaving(true);
+    setEditError(null);
+    const ok = await onEditCell!(rowIndex, col, result.value);
+    setSaving(false);
+    if (ok) setEditing(null);
+    else setEditError("Save failed — value not updated");
+  }
+
   const virtualItems = virtualizer.getVirtualItems();
   const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
   const paddingBottom =
     virtualItems.length > 0 ? virtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
+  const colSpan = columns.length + 1; // + the row-number gutter
+
+  if (initialLoading && rows.length === 0) return <GridSkeleton columnCount={Math.max(columns.length, 5)} />;
+
+  if (!initialLoading && !loading && rows.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center px-6 text-center text-xs text-muted-foreground">
+        No rows to show.
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -206,64 +246,132 @@ export function DataGrid({ columns, rows, loading, hasMore, onNeedMore, onEditCe
           }
         }}
       >
-        <table role="grid" aria-rowcount={rows.length} className="w-full border-collapse text-sm">
+        <table
+          role="grid"
+          aria-rowcount={rows.length}
+          className="border-collapse text-sm"
+          style={{ tableLayout: "fixed", width: totalWidth, minWidth: "100%" }}
+        >
           <thead className="sticky top-0 z-10 bg-card">
-            {table.getHeaderGroups().map((hg) => (
-              <tr key={hg.id}>
-                {onDeleteRow && (
-                  <th className="w-8 border-b border-r border-border bg-card px-1 py-1.5" aria-hidden />
-                )}
-                {hg.headers.map((header) => (
+            <tr>
+              <th
+                style={{ width: gutterWidth }}
+                scope="col"
+                className="border-b border-r border-border bg-card px-2 py-1.5 text-right text-[10px] font-normal text-muted-foreground/70"
+              >
+                #
+              </th>
+              {columns.map((col, colIndex) => {
+                const sorted = sort?.column === col.name ? sort.direction : null;
+                return (
                   <th
-                    key={header.id}
+                    key={col.name}
                     scope="col"
-                    className="whitespace-nowrap border-b border-r border-border px-3 py-1.5 text-left text-xs font-medium text-muted-foreground"
+                    style={{ width: columnWidths[colIndex] }}
+                    aria-sort={sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : "none"}
+                    className="border-b border-r border-border p-0 text-left text-xs font-medium text-muted-foreground"
                   >
-                    {flexRender(header.column.columnDef.header, header.getContext())}
+                    <button
+                      type="button"
+                      disabled={!onSortChange}
+                      onClick={() => cycleSort(col.name)}
+                      title={`${col.name} — ${col.nativeType ?? col.type}${onSortChange ? " (click to sort)" : ""}`}
+                      className={cn(
+                        "flex w-full items-center gap-1 px-3 py-1.5 text-left",
+                        onSortChange && "hover:bg-muted/60",
+                        sorted && "text-foreground"
+                      )}
+                    >
+                      <span className="truncate">{col.name}</span>
+                      {sorted === "asc" && <ArrowUp size={10} className="shrink-0" />}
+                      {sorted === "desc" && <ArrowDown size={10} className="shrink-0" />}
+                      {col.isPrimaryKey && <span className="shrink-0 text-[9px] text-accent">PK</span>}
+                    </button>
                   </th>
-                ))}
-              </tr>
-            ))}
+                );
+              })}
+            </tr>
           </thead>
           <tbody>
             {paddingTop > 0 && (
               <tr>
-                <td style={{ height: paddingTop }} colSpan={columns.length + (onDeleteRow ? 1 : 0)} />
+                <td style={{ height: paddingTop }} colSpan={colSpan} />
               </tr>
             )}
             {virtualItems.map((vi) => {
-              const row = tableRows[vi.index];
+              const row = rows[vi.index];
+              if (!row) return null;
               return (
                 <tr
-                  key={row.id}
+                  key={vi.key}
                   className={cn("hover:bg-muted/40", vi.index % 2 === 1 && "bg-card/40")}
                   style={{ height: ROW_HEIGHT }}
                 >
-                  {onDeleteRow && (
-                    <td className="border-r border-border/60 px-1 text-center">
-                      <button
-                        onClick={() => onDeleteRow(vi.index)}
-                        className="text-muted-foreground hover:text-destructive"
-                        aria-label={`Delete row ${vi.index + 1}`}
+                  <td
+                    style={{ width: gutterWidth }}
+                    className="border-r border-border/60 px-2 text-right align-middle font-mono text-[10px] text-muted-foreground/70"
+                  >
+                    <span className="inline-flex w-full items-center justify-end gap-1.5">
+                      {windowStartRow === null ? "·" : (windowStartRow + vi.index + 1).toLocaleString()}
+                      {onDeleteRow && (
+                        <button
+                          onClick={() => onDeleteRow(vi.index)}
+                          className="text-muted-foreground hover:text-destructive"
+                          aria-label={`Delete row ${vi.index + 1}`}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      )}
+                    </span>
+                  </td>
+                  {columns.map((col, colIndex) => {
+                    const isEditing = editing?.rowIndex === vi.index && editing.column === col.name;
+                    const isFocused = focusedCell?.row === vi.index && focusedCell?.col === colIndex;
+                    return (
+                      <td
+                        key={col.name}
+                        style={{ width: columnWidths[colIndex] }}
+                        className="overflow-hidden border-r border-border/60 px-3 py-1 font-mono text-xs text-foreground/90"
                       >
-                        <Trash2 size={12} />
-                      </button>
-                    </td>
-                  )}
-                  {row.getVisibleCells().map((cell) => (
-                    <td
-                      key={cell.id}
-                      className="whitespace-nowrap border-r border-border/60 px-3 py-1 font-mono text-xs text-foreground/90"
-                    >
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  ))}
+                        {isEditing ? (
+                          <EditCell
+                            column={col}
+                            initial={row[col.name]}
+                            error={editError}
+                            saving={saving}
+                            onCancel={() => {
+                              setEditing(null);
+                              setEditError(null);
+                            }}
+                            onCommit={(value) => commitEdit(vi.index, col, value)}
+                          />
+                        ) : (
+                          <div
+                            role="gridcell"
+                            data-cell={`${vi.index}-${colIndex}`}
+                            tabIndex={isFocused ? 0 : -1}
+                            aria-readonly={!onEditCell || col.isPrimaryKey}
+                            className={cn(
+                              "truncate outline-none",
+                              onEditCell && !col.isPrimaryKey && "cursor-text hover:bg-accent/10",
+                              isFocused && "ring-1 ring-inset ring-accent"
+                            )}
+                            onFocus={() => setFocusedCell({ row: vi.index, col: colIndex })}
+                            onClick={() => setFocusedCell({ row: vi.index, col: colIndex })}
+                            onDoubleClick={() => startEditing(vi.index, col)}
+                          >
+                            {formatCell(row[col.name])}
+                          </div>
+                        )}
+                      </td>
+                    );
+                  })}
                 </tr>
               );
             })}
             {paddingBottom > 0 && (
               <tr>
-                <td style={{ height: paddingBottom }} colSpan={columns.length + (onDeleteRow ? 1 : 0)} />
+                <td style={{ height: paddingBottom }} colSpan={colSpan} />
               </tr>
             )}
           </tbody>
@@ -273,13 +381,17 @@ export function DataGrid({ columns, rows, loading, hasMore, onNeedMore, onEditCe
           // FETCH_THRESHOLD_PX) while the user is still short of the actual
           // bottom of the table, so a normal in-flow indicator would render
           // off-screen below their current scroll position every time.
-          <div role="status" className="sticky bottom-0 border-t border-border bg-card px-3 py-2 text-xs text-muted-foreground">
+          <div
+            role="status"
+            className="sticky bottom-0 flex items-center gap-2 border-t border-border bg-card px-3 py-2 text-xs text-muted-foreground"
+          >
+            <span className="size-2 animate-pulse rounded-full bg-accent" aria-hidden />
             Loading more rows…
           </div>
         )}
-        {!hasMore && rows.length > 0 && (
+        {!loading && !hasMore && rows.length > 0 && (
           <div className="sticky bottom-0 border-t border-border bg-card px-3 py-2 text-xs text-muted-foreground">
-            End of table — {rows.length.toLocaleString()} rows loaded.
+            End of table.
           </div>
         )}
       </div>
@@ -287,23 +399,27 @@ export function DataGrid({ columns, rows, loading, hasMore, onNeedMore, onEditCe
   );
 }
 
+/**
+ * Owns its own draft state so typing re-renders one cell rather than the
+ * whole grid (which is what made editing feel laggy alongside the row-model
+ * rebuild). Keyed by the editing cell, so switching cells resets the draft.
+ */
 function EditCell({
   column,
-  draft,
-  setDraft,
+  initial,
   error,
   saving,
   onCommit,
   onCancel,
 }: {
   column: ColumnDefinition;
-  draft: string;
-  setDraft: (v: string) => void;
+  initial: unknown;
   error: string | null;
   saving: boolean;
-  onCommit: () => void;
+  onCommit: (value: string) => void;
   onCancel: () => void;
 }) {
+  const [draft, setDraft] = useState(initial === null || initial === undefined ? "" : String(initial));
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => {
     ref.current?.focus();
@@ -321,10 +437,10 @@ function EditCell({
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
           e.stopPropagation(); // don't let the grid's own arrow-key navigation intercept typing
-          if (e.key === "Enter") onCommit();
+          if (e.key === "Enter") onCommit(draft);
           if (e.key === "Escape") onCancel();
         }}
-        onBlur={onCommit}
+        onBlur={() => onCommit(draft)}
         placeholder={placeholderFor(column)}
         className={cn(
           "w-full rounded border bg-background px-1 py-0.5 font-mono text-xs outline-none",
@@ -336,6 +452,35 @@ function EditCell({
           {error}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Shown instead of an empty grid while the first page is in flight. The old
+ * behaviour was a blank pane that suddenly popped into a full table, which
+ * read as a hang on a slow connection.
+ */
+function GridSkeleton({ columnCount }: { columnCount: number }) {
+  return (
+    <div role="status" aria-label="Loading rows" className="flex h-full flex-col overflow-hidden">
+      <div className="flex gap-3 border-b border-border bg-card px-3 py-2">
+        {Array.from({ length: columnCount }).map((_, i) => (
+          <div key={i} className="h-3 flex-1 animate-pulse rounded bg-muted" />
+        ))}
+      </div>
+      {Array.from({ length: 14 }).map((_, row) => (
+        <div key={row} className="flex gap-3 border-b border-border/40 px-3 py-2">
+          {Array.from({ length: columnCount }).map((_, col) => (
+            <div
+              key={col}
+              className="h-3 flex-1 animate-pulse rounded bg-muted/60"
+              // Staggered so it reads as a loading sweep rather than one flashing block.
+              style={{ animationDelay: `${(row * columnCount + col) * 18}ms` }}
+            />
+          ))}
+        </div>
+      ))}
     </div>
   );
 }

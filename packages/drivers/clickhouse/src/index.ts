@@ -1,6 +1,9 @@
 import {
     diffTableSnapshots,
     assertSafeIdentifier,
+    keysetComparison,
+    resolveOrderBy,
+    MetadataCache,
     type ColumnDefinition,
     type ColumnType,
     type ConnectionConfig,
@@ -96,6 +99,7 @@ class ClickHouseConnection implements DriverConnection {
     private baseUrl: string;
     private database: string;
     private watchIntervals = new Map<string, ReturnType<typeof setInterval>>();
+    private metadata = new MetadataCache();
 
     constructor(id: string, baseUrl: string, database: string) {
         this.id = id;
@@ -158,7 +162,12 @@ class ClickHouseConnection implements DriverConnection {
         return this.listTablesIn(schema ?? this.database);
     }
 
-    private async describeColumns(database: string, table: string): Promise<ColumnDefinition[]> {
+    /** Cached wrapper — system.columns lookups, re-run per keyset page before this. */
+    private describeColumns(database: string, table: string): Promise<ColumnDefinition[]> {
+        return this.metadata.get(`cols:${database}.${table}`, () => this.describeColumnsUncached(database, table));
+    }
+
+    private async describeColumnsUncached(database: string, table: string): Promise<ColumnDefinition[]> {
         const result = await this.httpQuery(
             `SELECT name, type, is_in_primary_key FROM system.columns ` +
             `WHERE database = ${toLiteral(database)} AND table = ${toLiteral(table)} FORMAT JSON`
@@ -195,29 +204,48 @@ class ClickHouseConnection implements DriverConnection {
         assertSafeIdentifier(options.table, "table");
         for (const c of options.columns ?? []) assertSafeIdentifier(c, "column");
         for (const f of options.filters ?? []) assertSafeIdentifier(f.column, "column");
+        for (const s of options.sort ?? []) assertSafeIdentifier(s.column, "sort column");
 
-        const pkCols = await this.primaryKeyColumns(database, options.table);
-        const columns = await this.describeColumns(database, options.table);
+        const [pkCols, columns] = await Promise.all([
+            this.metadata.get(`pk:${database}.${options.table}`, () => this.primaryKeyColumns(database, options.table)),
+            this.describeColumns(database, options.table),
+        ]);
         const selectCols = options.columns?.length ? options.columns.map((c) => `\`${c}\``).join(", ") : "*";
 
+        const orderBy = resolveOrderBy(options.sort, pkCols);
+        const orderCols = orderBy.map((o) => o.column);
+        const descending = orderBy[0].direction === "desc";
+        const quote = (identifier: string) => `\`${identifier}\``;
+
         const where: string[] = [];
-        if (options.afterCursor) {
-            const cursorVals = decodeCursor(options.afterCursor);
-            const tuple = pkCols.map((c) => `\`${c}\``).join(", ");
-            // Cursor values for UInt64/Int64 columns arrive as JSON strings (see
-            // class doc comment on why) — quoting them here would compare a
-            // numeric column against a string literal, which this ClickHouse
-            // version rejects outright rather than casting. Use the pk column's
-            // known type to decide whether to emit a bare numeral or a quoted
-            // string literal.
-            const literals = cursorVals
-                .map((v, i) => {
-                    const colDef = columns.find((c) => c.name === pkCols[i]);
-                    return colDef?.type === "number" ? String(v) : toLiteral(v);
+
+        /**
+         * This driver's HTTP calls take one SQL string with no separate
+         * parameter binding, so keyset values are embedded as literals.
+         *
+         * UInt64/Int64 columns come back from ClickHouse as JSON strings (see
+         * the class doc comment), and quoting one to compare against a numeric
+         * column is rejected outright rather than cast — so the column's known
+         * type decides between a bare numeral and a quoted literal.
+         */
+        const pushKeyset = (values: unknown[], inclusive: boolean) => {
+            const literals = values.map((v, i) => {
+                const colDef = columns.find((c) => c.name === orderCols[i]);
+                return colDef?.type === "number" ? String(v) : toLiteral(v);
+            });
+            where.push(
+                keysetComparison(orderCols, values.length, {
+                    descending,
+                    inclusive,
+                    quote,
+                    placeholder: (i) => literals[i],
                 })
-                .join(", ");
-            where.push(`(${tuple}) > (${literals})`);
-        }
+            );
+        };
+
+        if (options.afterCursor) pushKeyset(decodeCursor(options.afterCursor), false);
+        else if (options.seek?.length) pushKeyset(options.seek.slice(0, orderCols.length), true);
+
         for (const f of options.filters ?? []) {
             if (f.op === "is_null") where.push(`\`${f.column}\` IS NULL`);
             else if (f.op === "is_not_null") where.push(`\`${f.column}\` IS NOT NULL`);
@@ -230,17 +258,17 @@ class ClickHouseConnection implements DriverConnection {
             }
         }
 
-        const orderBy = pkCols.map((c) => `\`${c}\` ASC`).join(", ");
+        const orderSql = orderBy.map((o) => `${quote(o.column)} ${o.direction === "desc" ? "DESC" : "ASC"}`).join(", ");
         const sql =
             `SELECT ${selectCols} FROM \`${database}\`.\`${options.table}\` ` +
-            `${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY ${orderBy} LIMIT ${options.pageSize + 1} FORMAT JSON`;
+            `${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY ${orderSql} LIMIT ${options.pageSize + 1} FORMAT JSON`;
 
         const result = await this.httpQuery(sql);
         const hasMore = result.data.length > options.pageSize;
         const page = hasMore ? result.data.slice(0, options.pageSize) : result.data;
-        const nextCursor = hasMore ? encodeCursor(pkCols.map((c) => page[page.length - 1][c])) : null;
+        const nextCursor = hasMore ? encodeCursor(orderCols.map((c) => page[page.length - 1][c])) : null;
 
-        return { rows: page, nextCursor, columns };
+        return { rows: page, nextCursor, columns, orderBy };
     }
 
     async estimateRowCount(table: string, schema?: string): Promise<RowCountEstimate> {
@@ -407,6 +435,7 @@ class ClickHouseConnection implements DriverConnection {
     }
 
     async close(): Promise<void> {
+        this.metadata.clear();
         for (const interval of this.watchIntervals.values()) clearInterval(interval);
         this.watchIntervals.clear();
     }

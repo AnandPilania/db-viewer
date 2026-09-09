@@ -25,7 +25,9 @@
     "typecheck": "pnpm -r run typecheck",
     "prepare": "pnpm run build",
     "prepack": "node scripts/prepack.mjs",
-    "release": "node scripts/release.mjs"
+    "release": "node scripts/release.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
@@ -38,7 +40,8 @@
     "nanoid": "^6.0.1"
   },
   "devDependencies": {
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
   },
   "publishConfig": {
     "access": "public"

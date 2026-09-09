@@ -1,5 +1,24 @@
-import type { ConnectionConfig, DriverConnection, QuerySpec } from "@pilaniaanand/driver-interface";
+import { assertSafeIdentifier, type ConnectionConfig, type DriverConnection, type QuerySpec } from "@pilaniaanand/driver-interface";
 import type { Widget } from "./models.js";
+
+/**
+ * Defence in depth against the widget store, not against the HTTP client.
+ *
+ * routes/widgets.ts validates on the way in, but widgets.json predates that
+ * validation — anything already on disk was written unchecked, and both
+ * values below are concatenated into SQL below (`aggregation` as a function
+ * name, `schema` as a quoted identifier). So they are re-checked here, where
+ * the string actually meets the query text.
+ */
+const SQL_AGGREGATIONS = new Set(["count", "sum", "avg", "min", "max"]);
+
+function assertQueryableWidget(widget: Widget): void {
+    if (!SQL_AGGREGATIONS.has(widget.aggregation)) {
+        throw new Error(`Unsupported aggregation: ${JSON.stringify(widget.aggregation)}`);
+    }
+    if (widget.schema !== undefined) assertSafeIdentifier(widget.schema, "schema");
+    assertSafeIdentifier(widget.table, "table");
+}
 
 /** SQL-family drivers build a validated SQL string; MongoDB and Redis build their own native query shapes instead (see fetchMongoWidgetData / fetchRedisWidgetData). ClickHouse is SQL too, but its driver's streamQuery doesn't bind params (see chLiteral below), so it gets literal-embedded values instead of placeholders. */
 const SQL_DRIVERS = new Set(["postgres", "mysql", "sqlite", "clickhouse"]);
@@ -55,6 +74,7 @@ export async function fetchWidgetData(
         throw new Error(`Dashboard charts aren't supported for ${config.driver} yet.`);
     }
     const driver = config.driver;
+    assertQueryableWidget(widget);
 
     const tables = await conn.listTables(widget.schema);
     const tableDef = tables.find((t) => t.name === widget.table);
@@ -134,6 +154,11 @@ export async function fetchWidgetData(
  * `$group`/`$match` stage.
  */
 async function fetchMongoWidgetData(conn: DriverConnection, widget: Widget): Promise<WidgetData> {
+    // `aggregation` becomes a `$sum`/`$avg`/... accumulator key below, so it
+    // needs the same closed-set check the SQL path gets.
+    if (!SQL_AGGREGATIONS.has(widget.aggregation)) {
+        throw new Error(`Unsupported aggregation: ${JSON.stringify(widget.aggregation)}`);
+    }
     const collections = await conn.listTables();
     const collDef = collections.find((c) => c.name === widget.table);
     if (!collDef) throw new Error(`Collection "${widget.table}" not found`);

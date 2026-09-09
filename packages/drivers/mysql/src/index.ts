@@ -4,6 +4,9 @@ import {
     diffTableSnapshots,
     resolveSsl,
     assertSafeIdentifier,
+    keysetComparison,
+    resolveOrderBy,
+    MetadataCache,
     type ColumnDefinition,
     type ColumnType,
     type ConnectionConfig,
@@ -65,6 +68,7 @@ class MysqlConnection implements DriverConnection {
     private pool: Pool;
     private database: string;
     private watchIntervals = new Map<string, ReturnType<typeof setInterval>>();
+    private metadata = new MetadataCache();
 
     constructor(id: string, pool: Pool, database: string) {
         this.id = id;
@@ -97,7 +101,12 @@ class MysqlConnection implements DriverConnection {
         return tables;
     }
 
-    private async describeColumns(table: string): Promise<ColumnDefinition[]> {
+    /** Cached wrapper — these are information_schema queries; re-running them per keyset page dominated paging cost. */
+    private describeColumns(table: string): Promise<ColumnDefinition[]> {
+        return this.metadata.get(`cols:${table}`, () => this.describeColumnsUncached(table));
+    }
+
+    private async describeColumnsUncached(table: string): Promise<ColumnDefinition[]> {
         const [cols] = await this.pool.query<RowDataPacket[]>(
             `SELECT COLUMN_NAME AS name, DATA_TYPE AS dataType, IS_NULLABLE AS nullable,
               COLUMN_KEY AS colKey, COLUMN_DEFAULT AS defaultValue
@@ -140,21 +149,29 @@ class MysqlConnection implements DriverConnection {
         assertSafeIdentifier(options.table, "table");
         for (const c of options.columns ?? []) assertSafeIdentifier(c, "column");
         for (const f of options.filters ?? []) assertSafeIdentifier(f.column, "column");
+        for (const s of options.sort ?? []) assertSafeIdentifier(s.column, "sort column");
 
-        const pkCols = await this.primaryKeyColumns(options.table);
-        const columns = await this.describeColumns(options.table);
+        const [pkCols, columns] = await Promise.all([
+            this.metadata.get(`pk:${options.table}`, () => this.primaryKeyColumns(options.table)),
+            this.describeColumns(options.table),
+        ]);
         const selectCols = options.columns?.length ? options.columns.map((c) => `\`${c}\``).join(", ") : "*";
+
+        const orderBy = resolveOrderBy(options.sort, pkCols);
+        const orderCols = orderBy.map((o) => o.column);
+        const descending = orderBy[0].direction === "desc";
 
         const where: string[] = [];
         const params: unknown[] = [];
+        const quote = (identifier: string) => `\`${identifier}\``;
 
-        if (options.afterCursor) {
-            const cursorVals = decodeCursor(options.afterCursor);
-            const tuple = pkCols.map((c) => `\`${c}\``).join(", ");
-            const placeholders = cursorVals.map(() => "?").join(", ");
-            where.push(`(${tuple}) > (${placeholders})`);
-            params.push(...cursorVals);
-        }
+        const pushKeyset = (values: unknown[], inclusive: boolean) => {
+            where.push(keysetComparison(orderCols, values.length, { descending, inclusive, quote, placeholder: () => "?" }));
+            params.push(...values);
+        };
+
+        if (options.afterCursor) pushKeyset(decodeCursor(options.afterCursor), false);
+        else if (options.seek?.length) pushKeyset(options.seek.slice(0, orderCols.length), true);
         for (const f of options.filters ?? []) {
             if (f.op === "is_null") where.push(`\`${f.column}\` IS NULL`);
             else if (f.op === "is_not_null") where.push(`\`${f.column}\` IS NOT NULL`);
@@ -169,17 +186,17 @@ class MysqlConnection implements DriverConnection {
             }
         }
 
-        const orderBy = pkCols.map((c) => `\`${c}\` ASC`).join(", ");
+        const orderSql = orderBy.map((o) => `${quote(o.column)} ${o.direction === "desc" ? "DESC" : "ASC"}`).join(", ");
         const sql = `SELECT ${selectCols} FROM \`${options.table}\` ${where.length ? "WHERE " + where.join(" AND ") : ""
-            } ORDER BY ${orderBy} LIMIT ?`;
+            } ORDER BY ${orderSql} LIMIT ?`;
         params.push(options.pageSize + 1);
 
         const [rows] = await this.pool.query<RowDataPacket[]>(sql, params);
         const hasMore = rows.length > options.pageSize;
         const page = hasMore ? rows.slice(0, options.pageSize) : rows;
-        const nextCursor = hasMore ? encodeCursor(pkCols.map((c) => page[page.length - 1][c])) : null;
+        const nextCursor = hasMore ? encodeCursor(orderCols.map((c) => page[page.length - 1][c])) : null;
 
-        return { rows: page as Record<string, unknown>[], nextCursor, columns };
+        return { rows: page as Record<string, unknown>[], nextCursor, columns, orderBy };
     }
 
     async estimateRowCount(table: string): Promise<RowCountEstimate> {
@@ -350,6 +367,7 @@ class MysqlConnection implements DriverConnection {
     }
 
     async close(): Promise<void> {
+        this.metadata.clear();
         for (const interval of this.watchIntervals.values()) clearInterval(interval);
         this.watchIntervals.clear();
         await this.pool.end();

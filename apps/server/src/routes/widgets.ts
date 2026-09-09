@@ -2,15 +2,14 @@ import type { FastifyInstance } from "fastify";
 import { widgetStore } from "../widget-store.js";
 import { connectionStore } from "../connection-store.js";
 import { fetchWidgetData } from "../chart-query.js";
-import type { Widget } from "../models.js";
+import { validateWidgetInput, validateWidgetPatch } from "../widget-validation.js";
 
 export async function widgetRoutes(app: FastifyInstance) {
   app.get("/api/widgets", async () => widgetStore.list());
 
   app.post("/api/widgets", async (req, reply) => {
-    const body = req.body as Omit<Widget, "id" | "createdAt">;
     try {
-      return widgetStore.create(body);
+      return widgetStore.create(validateWidgetInput(req.body));
     } catch (err) {
       reply.code(400);
       return { error: (err as Error).message };
@@ -20,7 +19,7 @@ export async function widgetRoutes(app: FastifyInstance) {
   app.patch("/api/widgets/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
     try {
-      return widgetStore.update(id, req.body as Partial<Widget>);
+      return widgetStore.update(id, validateWidgetPatch(widgetStore.get(id), req.body));
     } catch (err) {
       reply.code(400);
       return { error: (err as Error).message };

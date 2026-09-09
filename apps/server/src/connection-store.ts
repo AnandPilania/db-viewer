@@ -11,7 +11,14 @@ const STORE_PATH = path.join(DATA_DIR, "connections.json");
 
 interface StoredConnection {
     config: ConnectionConfig; // in-memory copy has plaintext password/keys
-    live?: DriverConnection;
+    /**
+     * The in-flight-or-resolved connect() promise, not the resolved value —
+     * concurrent getLive() calls (a dashboard loading N widgets at once, a
+     * watch socket opening alongside a page fetch) would otherwise each see
+     * `live` unset and open their own pool, leaving every pool but the last
+     * orphaned and never closed.
+     */
+    live?: Promise<DriverConnection>;
 }
 
 /** On-disk shape: every secret (password, TLS client key, SSH credentials) is encrypted, everything else is plain. */
@@ -163,7 +170,12 @@ class ConnectionStore {
         if (!entry) throw new Error(`Unknown connection "${id}"`);
         if (!entry.live) {
             const driver = registry.get(entry.config.driver);
-            entry.live = await driver.connect(await this.withTunnel(entry.config));
+            entry.live = (async () => driver.connect(await this.withTunnel(entry.config)))();
+            // A failed connect must not be cached, or the connection is
+            // permanently broken until restart.
+            entry.live.catch(() => {
+                if (this.connections.get(id) === entry) entry.live = undefined;
+            });
         }
         return entry.live;
     }
@@ -171,7 +183,7 @@ class ConnectionStore {
     async remove(id: string): Promise<void> {
         const entry = this.connections.get(id);
         if (!entry) return;
-        if (entry.live) await entry.live.close();
+        if (entry.live) await entry.live.then((c) => c.close()).catch(() => { });
         this.closeTunnel(id);
         this.connections.delete(id);
         this.saveToDisk();
@@ -181,7 +193,7 @@ class ConnectionStore {
     async closeAll(): Promise<void> {
         const closes = [...this.connections.values()]
             .filter((entry) => entry.live)
-            .map((entry) => entry.live!.close().catch(() => { }));
+            .map((entry) => entry.live!.then((c) => c.close()).catch(() => { }));
         await Promise.all(closes);
         for (const id of [...this.tunnels.keys()]) this.closeTunnel(id);
     }

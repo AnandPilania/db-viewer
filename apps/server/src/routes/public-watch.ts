@@ -51,7 +51,13 @@ export async function publicWatchRoutes(app: FastifyInstance) {
         }
       });
 
+      // An errored socket fires 'error' *and then* 'close', so an unguarded
+      // cleanup released the refcount twice — dropping it to zero while other
+      // tabs were still watching, which silently stopped their native watcher.
+      let cleanedUp = false;
       const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
         unsubscribe();
         releaseNativeWatch(widget.connectionId, widget.table);
       };

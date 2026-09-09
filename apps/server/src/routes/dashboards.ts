@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { dashboardStore } from "../dashboard-store.js";
 import { widgetStore } from "../widget-store.js";
@@ -12,6 +13,12 @@ import type { DashboardLayoutItem } from "../models.js";
  * accept no free-form SQL, table, or column input from the caller. An
  * embed link can only show what its creator configured, nothing else.
  */
+/** Constant-time compare so a wrong token leaks nothing through response timing. */
+function tokenMatches(supplied: string | undefined, expected: string): boolean {
+  if (typeof supplied !== "string" || supplied.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+}
+
 export function authorizeEmbed(
   dashboardId: string,
   token: string | undefined
@@ -25,7 +32,7 @@ export function authorizeEmbed(
   if (!dashboard.embedEnabled || !dashboard.shareToken) {
     return { ok: false, status: 403, error: "Embedding is not enabled for this dashboard" };
   }
-  if (token !== dashboard.shareToken) {
+  if (!tokenMatches(token, dashboard.shareToken)) {
     return { ok: false, status: 403, error: "Invalid or missing embed token" };
   }
   return { ok: true };

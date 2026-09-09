@@ -4,6 +4,9 @@ import Cursor from "pg-cursor";
 import {
     resolveSsl,
     assertSafeIdentifier,
+    keysetComparison,
+    MetadataCache,
+    resolveOrderBy,
     type ColumnDefinition,
     type ColumnType,
     type ConnectionConfig,
@@ -37,7 +40,10 @@ function toPgSsl(config: ConnectionConfig): pg.PoolConfig["ssl"] {
 }
 
 function mapPgType(dataType: string): ColumnType {
-    const t = dataType.toLowerCase();
+    // format_type() returns modifiers and array markers — "character
+    // varying(255)", "numeric(10,2)", "text[]" — none of which change the
+    // logical bucket, so strip them before matching.
+    const t = dataType.toLowerCase().replace(/\(.*$/, "").replace(/\[\]$/, "").trim();
     if (["int2", "int4", "int8", "numeric", "float4", "float8", "money", "smallint", "integer", "bigint", "real", "double precision", "decimal"].includes(t))
         return "number";
     if (["bool", "boolean"].includes(t)) return "boolean";
@@ -63,10 +69,21 @@ class PostgresConnection implements DriverConnection {
     private listenerSetupPromise: Promise<void> | null = null;
     private watchHandlers = new Map<string, Set<(event: RowChangeEvent) => void>>();
     private triggersInstalled = new Set<string>();
+    private metadata = new MetadataCache();
 
-    constructor(id: string, pool: pg.Pool) {
+    /**
+     * True when this connection was saved read-only. Live table watching on
+     * Postgres is trigger-based, i.e. DDL — the route-level read-only gate
+     * only covers insert/update/delete/execute, so without this a connection
+     * the user marked read-only would still have CREATE TRIGGER run against
+     * it the moment they opened a table.
+     */
+    private readOnly: boolean;
+
+    constructor(id: string, pool: pg.Pool, readOnly = false) {
         this.id = id;
         this.pool = pool;
+        this.readOnly = readOnly;
     }
 
     async listSchemas(): Promise<SchemaSummary[]> {
@@ -83,64 +100,115 @@ class PostgresConnection implements DriverConnection {
     }
 
     async listTables(schema = "public"): Promise<TableDefinition[]> {
-        const { rows } = await this.pool.query(
-            `SELECT c.relname AS name, c.relkind AS kind, c.reltuples::bigint AS estimate
+        const [{ rows }, columnsByTable] = await Promise.all([
+            this.pool.query(
+                `SELECT c.relname AS name, c.relkind AS kind, c.reltuples::bigint AS estimate
        FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE n.nspname = $1 AND c.relkind IN ('r','v','m')
        ORDER BY c.relname`,
-            [schema]
-        );
-        const tables: TableDefinition[] = [];
-        for (const r of rows) {
-            const columns = await this.describeColumns(r.name, schema);
-            tables.push({
-                schema,
-                name: r.name,
-                kind: r.kind === "v" ? "view" : r.kind === "m" ? "materialized_view" : "table",
-                columns,
-                estimatedRowCount: Math.max(0, Number(r.estimate) || 0), // reltuples is -1 until the table is first ANALYZEd
-            });
-        }
-        return tables;
+                [schema]
+            ),
+            this.schemaColumns(schema),
+        ]);
+        return rows.map((r) => ({
+            schema,
+            name: r.name,
+            kind: r.kind === "v" ? "view" : r.kind === "m" ? "materialized_view" : "table",
+            columns: columnsByTable.get(r.name) ?? [],
+            estimatedRowCount: Math.max(0, Number(r.estimate) || 0), // reltuples is -1 until the table is first ANALYZEd
+        }));
     }
 
-    private async describeColumns(table: string, schema: string): Promise<ColumnDefinition[]> {
-        const { rows: cols } = await this.pool.query(
-            `SELECT column_name, data_type, is_nullable, column_default
-       FROM information_schema.columns
-       WHERE table_schema = $1 AND table_name = $2
-       ORDER BY ordinal_position`,
-            [schema, table]
-        );
-        const { rows: pks } = await this.pool.query(
-            `SELECT a.attname AS column_name
-       FROM pg_index i
-       JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-       WHERE i.indrelid = (quote_ident($1)||'.'||quote_ident($2))::regclass AND i.indisprimary`,
-            [schema, table]
-        );
-        const { rows: fks } = await this.pool.query(
-            `SELECT kcu.column_name, ccu.table_name AS foreign_table, ccu.column_name AS foreign_column
-       FROM information_schema.table_constraints tc
-       JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-       JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name
-       WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = $1 AND tc.table_name = $2`,
-            [schema, table]
-        );
-        const pkSet = new Set(pks.map((p) => p.column_name));
-        return cols.map((c) => {
-            const fk = fks.find((f) => f.column_name === c.column_name);
-            return {
-                name: c.column_name,
-                type: mapPgType(c.data_type),
-                nativeType: c.data_type,
-                nullable: c.is_nullable === "YES",
-                isPrimaryKey: pkSet.has(c.column_name),
-                isForeignKey: !!fk,
-                references: fk ? { table: fk.foreign_table, column: fk.foreign_column } : undefined,
-                defaultValue: c.column_default,
-            };
+    /**
+     * Every column, primary key, and foreign key in a schema in three
+     * catalog queries, grouped by table.
+     *
+     * This used to be three queries *per table*, which made drawing the
+     * schema sidebar cost 3N round-trips — minutes on a database with a few
+     * thousand tables. Each table's entry is also seeded into the metadata
+     * cache on the way out, so the subsequent per-table describeColumns()
+     * calls (from queryRows, describeTable) are all cache hits.
+     *
+     * pg_catalog is queried directly rather than information_schema: the
+     * latter is a set of permission-filtering views that plan poorly and are
+     * dramatically slower on large catalogs.
+     */
+    private schemaColumns(schema: string): Promise<Map<string, ColumnDefinition[]>> {
+        return this.metadata.get(`schema-cols:${schema}`, async () => {
+            const [{ rows: cols }, { rows: pks }, { rows: fks }] = await Promise.all([
+                this.pool.query(
+                    `SELECT c.relname AS table_name,
+                    a.attname AS column_name,
+                    format_type(a.atttypid, a.atttypmod) AS data_type,
+                    NOT a.attnotnull AS nullable,
+                    pg_get_expr(d.adbin, d.adrelid) AS column_default
+             FROM pg_attribute a
+             JOIN pg_class c ON c.oid = a.attrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+             WHERE n.nspname = $1 AND c.relkind IN ('r','v','m')
+               AND a.attnum > 0 AND NOT a.attisdropped
+             ORDER BY c.relname, a.attnum`,
+                    [schema]
+                ),
+                this.pool.query(
+                    `SELECT c.relname AS table_name, a.attname AS column_name
+             FROM pg_index i
+             JOIN pg_class c ON c.oid = i.indrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+             WHERE n.nspname = $1 AND i.indisprimary`,
+                    [schema]
+                ),
+                this.pool.query(
+                    `SELECT c.relname AS table_name,
+                    a.attname AS column_name,
+                    fc.relname AS foreign_table,
+                    fa.attname AS foreign_column
+             FROM pg_constraint con
+             JOIN pg_class c ON c.oid = con.conrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_class fc ON fc.oid = con.confrelid
+             JOIN unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+             JOIN unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord) ON fk.ord = k.ord
+             JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+             JOIN pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = fk.attnum
+             WHERE n.nspname = $1 AND con.contype = 'f'`,
+                    [schema]
+                ),
+            ]);
+
+            const pkSet = new Set(pks.map((p) => `${p.table_name}.${p.column_name}`));
+            const fkMap = new Map(fks.map((f) => [`${f.table_name}.${f.column_name}`, f]));
+
+            const byTable = new Map<string, ColumnDefinition[]>();
+            for (const c of cols) {
+                const fk = fkMap.get(`${c.table_name}.${c.column_name}`);
+                const list = byTable.get(c.table_name) ?? [];
+                list.push({
+                    name: c.column_name,
+                    type: mapPgType(c.data_type),
+                    nativeType: c.data_type,
+                    nullable: c.nullable,
+                    isPrimaryKey: pkSet.has(`${c.table_name}.${c.column_name}`),
+                    isForeignKey: !!fk,
+                    references: fk ? { table: fk.foreign_table, column: fk.foreign_column } : undefined,
+                    defaultValue: c.column_default,
+                });
+                byTable.set(c.table_name, list);
+            }
+
+            for (const [table, columns] of byTable) this.metadata.set(`cols:${schema}.${table}`, columns);
+            return byTable;
+        });
+    }
+
+    /** One table's columns. Resolved from the schema-wide sweep above, so N tables cost 3 queries, not 3N. */
+    private describeColumns(table: string, schema: string): Promise<ColumnDefinition[]> {
+        return this.metadata.get(`cols:${schema}.${table}`, async () => {
+            const byTable = await this.schemaColumns(schema);
+            return byTable.get(table) ?? [];
         });
     }
 
@@ -166,23 +234,45 @@ class PostgresConnection implements DriverConnection {
         assertSafeIdentifier(schema, "schema");
         for (const c of options.columns ?? []) assertSafeIdentifier(c, "column");
         for (const f of options.filters ?? []) assertSafeIdentifier(f.column, "column");
+        for (const s of options.sort ?? []) assertSafeIdentifier(s.column, "sort column");
 
-        const pkCols = await this.primaryKeyColumns(options.table, schema);
-        const columns = await this.describeColumns(options.table, schema);
+        // Cached: these are catalog queries, and re-running them for every
+        // keyset page is what dominated the cost of paging a table.
+        const [pkCols, columns] = await Promise.all([
+            this.metadata.get(`pk:${schema}.${options.table}`, () => this.primaryKeyColumns(options.table, schema)),
+            this.describeColumns(options.table, schema),
+        ]);
         const selectCols = options.columns?.length ? options.columns.map((c) => `"${c}"`).join(", ") : "*";
+
+        const orderBy = resolveOrderBy(options.sort, pkCols);
+        const descending = orderBy[0].direction === "desc";
+        const orderCols = orderBy.map((o) => o.column);
 
         const where: string[] = [];
         const params: unknown[] = [];
         let p = 1;
 
+        const quote = (identifier: string) => `"${identifier}"`;
+        const keysetPredicate = (values: unknown[], inclusive: boolean) => {
+            const base = p;
+            where.push(
+                keysetComparison(orderCols, values.length, {
+                    descending,
+                    inclusive,
+                    quote,
+                    placeholder: (i) => `$${base + i}`,
+                })
+            );
+            p += values.length;
+            params.push(...values);
+        };
+
         if (options.afterCursor) {
-            const cursorVals = decodeCursor(options.afterCursor);
-            // Row-wise comparison for correct multi-column keyset pagination: (pk1, pk2, ...) > (v1, v2, ...)
-            const tuple = pkCols.map((c) => `"${c}"`).join(", ");
-            const placeholders = cursorVals.map(() => `$${p++}`).join(", ");
-            where.push(`(${tuple}) > (${placeholders})`);
-            params.push(...cursorVals);
+            keysetPredicate(decodeCursor(options.afterCursor), false);
+        } else if (options.seek?.length) {
+            keysetPredicate(options.seek.slice(0, orderCols.length), true);
         }
+
         for (const f of options.filters ?? []) {
             if (f.op === "is_null") where.push(`"${f.column}" IS NULL`);
             else if (f.op === "is_not_null") where.push(`"${f.column}" IS NOT NULL`);
@@ -198,17 +288,18 @@ class PostgresConnection implements DriverConnection {
             }
         }
 
-        const orderBy = pkCols.map((c) => `"${c}" ASC`).join(", ");
-        const sql = `SELECT ${selectCols} FROM "${schema}"."${options.table}" ${where.length ? "WHERE " + where.join(" AND ") : ""
-            } ORDER BY ${orderBy} LIMIT $${p}`;
+        const orderSql = orderBy.map((o) => `${quote(o.column)} ${o.direction === "desc" ? "DESC" : "ASC"}`).join(", ");
+        const sql = `SELECT ${selectCols} FROM "${schema}"."${options.table}" ${
+            where.length ? "WHERE " + where.join(" AND ") : ""
+        } ORDER BY ${orderSql} LIMIT $${p}`;
         params.push(options.pageSize + 1);
 
-        const { rows } = await this.pool.query(sql, params);
+        const { rows } = await this.pool.query({ text: sql, values: params });
         const hasMore = rows.length > options.pageSize;
         const page = hasMore ? rows.slice(0, options.pageSize) : rows;
-        const nextCursor = hasMore ? encodeCursor(pkCols.map((c) => page[page.length - 1][c])) : null;
+        const nextCursor = hasMore ? encodeCursor(orderCols.map((c) => page[page.length - 1][c])) : null;
 
-        return { rows: page, nextCursor, columns };
+        return { rows: page, nextCursor, columns, orderBy };
     }
 
     async estimateRowCount(table: string, schema = "public"): Promise<RowCountEstimate> {
@@ -376,7 +467,12 @@ class PostgresConnection implements DriverConnection {
         // return, but installing the trigger and opening the LISTEN connection
         // are both async. Notifications simply won't arrive until this
         // resolves (a few hundred ms on first watch of a given connection).
-        void this.ensureListening(s, table);
+        // Swallowed rather than left to reject: a database that refuses the
+        // trigger (no permission, read replica) should cost the user live
+        // updates, not an unhandled rejection that takes down the process.
+        this.ensureListening(s, table).catch(() => {
+            /* live updates unavailable for this table; app-originated events still flow */
+        });
 
         return () => {
             this.watchHandlers.get(key)?.delete(onChange);
@@ -385,8 +481,11 @@ class PostgresConnection implements DriverConnection {
 
     private async ensureListening(schema: string, table: string): Promise<void> {
         const triggerKey = `${schema}.${table}`;
-        if (!this.triggersInstalled.has(triggerKey)) {
-            this.triggersInstalled.add(triggerKey);
+        // Read-only connections get the LISTEN half only: if something else
+        // already installed the trigger the notifications still arrive, but
+        // this process will not write DDL to a database the user told it not
+        // to write to.
+        if (!this.readOnly && !this.triggersInstalled.has(triggerKey)) {
             await this.pool.query(`
         CREATE OR REPLACE FUNCTION __dbviewer_notify_change() RETURNS TRIGGER AS $$
         DECLARE
@@ -435,10 +534,17 @@ class PostgresConnection implements DriverConnection {
         AFTER INSERT OR UPDATE OR DELETE ON "${schema}"."${table}"
         FOR EACH ROW EXECUTE FUNCTION __dbviewer_notify_change();
       `);
+            // Recorded only after the DDL actually succeeded — marking it up
+            // front meant one transient failure disabled live updates for that
+            // table until restart, and left close() trying to drop a trigger
+            // that was never created.
+            this.triggersInstalled.add(triggerKey);
         }
 
         if (!this.listenerSetupPromise) {
             this.listenerSetupPromise = (async () => {
+                // Cleared on failure so a later watch retries rather than
+                // awaiting a promise that will never resolve.
                 const client = await this.pool.connect();
                 this.listenerClient = client;
                 await client.query("LISTEN dbviewer_changes");
@@ -462,10 +568,16 @@ class PostgresConnection implements DriverConnection {
                 });
             })();
         }
-        await this.listenerSetupPromise;
+        try {
+            await this.listenerSetupPromise;
+        } catch (err) {
+            this.listenerSetupPromise = null;
+            throw err;
+        }
     }
 
     async close(): Promise<void> {
+        this.metadata.clear();
         for (const key of this.triggersInstalled) {
             const [schema, table] = key.split(".");
             await this.pool.query(`DROP TRIGGER IF EXISTS __dbviewer_watch ON "${schema}"."${table}"`).catch(() => {});
@@ -514,7 +626,7 @@ export const postgresDriver: DatabaseDriver = {
             ssl: toPgSsl(config),
             max: 10,
         });
-        return new PostgresConnection(config.id, pool);
+        return new PostgresConnection(config.id, pool, !!config.readOnly || process.env.DB_VIEWER_READ_ONLY === "true");
     },
 };
 

@@ -2,6 +2,8 @@ import Database from "better-sqlite3";
 import {
     diffTableSnapshots,
     assertSafeIdentifier,
+    keysetComparison,
+    resolveOrderBy,
     type ColumnDefinition,
     type ColumnType,
     type ConnectionConfig,
@@ -46,11 +48,14 @@ function mapSqliteType(declared: string): ColumnType {
 }
 
 /** Cursor is `<pkColumnValue>` base64-encoded; sqlite driver only supports a single-column keyset for simplicity. */
-function encodeCursor(value: unknown): string {
-    return Buffer.from(JSON.stringify(value)).toString("base64");
+function encodeCursor(values: unknown[]): string {
+    return Buffer.from(JSON.stringify(values)).toString("base64");
 }
-function decodeCursor(cursor: string): unknown {
-    return JSON.parse(Buffer.from(cursor, "base64").toString("utf-8"));
+function decodeCursor(cursor: string): unknown[] {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64").toString("utf-8"));
+    // Cursors used to encode a bare primary-key scalar; tolerate one so a
+    // cursor held by an open tab across a restart still works.
+    return Array.isArray(parsed) ? parsed : [parsed];
 }
 
 class SqliteConnection implements DriverConnection {
@@ -145,13 +150,26 @@ class SqliteConnection implements DriverConnection {
         const columns = this.describeColumnsSync(table);
         const selectCols = options.columns?.length ? options.columns.map((c) => `"${c}"`).join(", ") : "*";
 
+        // The cursor must key on the *same* tuple the rows are ordered by.
+        // With a sort applied, this used to order by (sortCol, pk) while the
+        // cursor compared pk alone — so every page boundary after the first
+        // silently skipped or repeated rows.
+        const orderBy = resolveOrderBy(sort, [pk]);
+        const orderCols = orderBy.map((o) => o.column);
+        const descending = orderBy[0].direction === "desc";
+
         const where: string[] = [];
         const params: unknown[] = [];
+        const quote = (identifier: string) => `"${identifier}"`;
 
-        if (afterCursor) {
-            where.push(`"${pk}" > ?`);
-            params.push(decodeCursor(afterCursor));
-        }
+        const pushKeyset = (values: unknown[], inclusive: boolean) => {
+            where.push(keysetComparison(orderCols, values.length, { descending, inclusive, quote, placeholder: () => "?" }));
+            params.push(...values);
+        };
+
+        if (afterCursor) pushKeyset(decodeCursor(afterCursor), false);
+        else if (options.seek?.length) pushKeyset(options.seek.slice(0, orderCols.length), true);
+
         for (const f of filters ?? []) {
             if (f.op === "is_null") where.push(`"${f.column}" IS NULL`);
             else if (f.op === "is_not_null") where.push(`"${f.column}" IS NOT NULL`);
@@ -168,22 +186,17 @@ class SqliteConnection implements DriverConnection {
             }
         }
 
-        const orderBy = sort?.length
-            ? sort
-                .map((s) => `"${s.column}" ${s.direction === "desc" ? "DESC" : "ASC"}`)
-                .join(", ") + `, "${pk}" ASC`
-            : `"${pk}" ASC`;
-
+        const orderSql = orderBy.map((o) => `${quote(o.column)} ${o.direction === "desc" ? "DESC" : "ASC"}`).join(", ");
         const sql = `SELECT ${selectCols} FROM "${table}" ${where.length ? "WHERE " + where.join(" AND ") : ""
-            } ORDER BY ${orderBy} LIMIT ?`;
+            } ORDER BY ${orderSql} LIMIT ?`;
         params.push(pageSize + 1); // fetch one extra to know if there's a next page
 
         const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
         const hasMore = rows.length > pageSize;
         const page = hasMore ? rows.slice(0, pageSize) : rows;
-        const nextCursor = hasMore ? encodeCursor((page[page.length - 1] as Record<string, unknown>)[pk]) : null;
+        const nextCursor = hasMore ? encodeCursor(orderCols.map((c) => page[page.length - 1][c])) : null;
 
-        return { rows: page, nextCursor, columns };
+        return { rows: page, nextCursor, columns, orderBy };
     }
 
     async estimateRowCount(table: string): Promise<RowCountEstimate> {

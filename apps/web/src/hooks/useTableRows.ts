@@ -1,120 +1,214 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDefinition } from "@pilaniaanand/driver-interface";
 import { api } from "@/lib/api";
+import { applyRowChange } from "@/lib/apply-row-change";
 import type { RowChangeEvent } from "@/hooks/useTableRealtime";
 
 const PAGE_SIZE = 200;
 
+/**
+ * How many pages stay resident. Pages beyond this are dropped from the front
+ * as the user scrolls down, which is the whole reason this hook can face a
+ * table of any size: the old implementation appended every page into one
+ * growing array, so the browser tab died somewhere around a million rows no
+ * matter how well the grid virtualized its painting.
+ *
+ * 100 pages x 200 rows = 20k rows resident. Rows above the window are still
+ * reachable — scrolling up refetches them — they just aren't held in memory.
+ */
+const MAX_PAGES = 100;
+const WINDOW_ROWS = MAX_PAGES * PAGE_SIZE;
+
+export interface TableSort {
+    column: string;
+    direction: "asc" | "desc";
+}
+
+/**
+ * A position in the table, used as the page param.
+ *
+ * `cursor` is an opaque driver-issued keyset cursor (continue after a known
+ * row). `seek` is a sort-key value the user asked to jump to, which the
+ * driver resolves to an index position — this is what makes "go to row ~800
+ * billion" possible without an OFFSET scan. `index` is the page's ordinal
+ * from the current anchor, used to label absolute row numbers in the UI.
+ */
+interface PageParam {
+    cursor: string | null;
+    seek: unknown[] | null;
+    index: number;
+}
+
+const FIRST_PAGE: PageParam = { cursor: null, seek: null, index: 0 };
+
 export function useTableRows(connectionId: string | null, table: string | null, schema?: string) {
-    const [rows, setRows] = useState<Record<string, unknown>[]>([]);
-    const [columns, setColumns] = useState<ColumnDefinition[]>([]);
-    const [loading, setLoading] = useState(false);
-    const [hasMore, setHasMore] = useState(true);
-    const [error, setError] = useState<string | null>(null);
-    const cursorRef = useRef<string | null>(null);
-    const loadingRef = useRef(false);
-    const columnsRef = useRef<ColumnDefinition[]>([]);
-    columnsRef.current = columns;
+    const queryClient = useQueryClient();
+    const [sort, setSort] = useState<TableSort | null>(null);
+    /** Non-null once the user has jumped; the window's rows start at an unknown absolute offset. */
+    const [anchor, setAnchor] = useState<{ seek: unknown[]; label: string } | null>(null);
+    const [localRows, setLocalRows] = useState<Record<string, unknown>[] | null>(null);
 
-    const reset = useCallback(() => {
-        setRows([]);
-        setColumns([]);
-        cursorRef.current = null;
-        setHasMore(true);
-        setError(null);
-    }, []);
+    const queryKey = useMemo(
+        () => ["table-rows", connectionId, schema ?? null, table, sort, anchor?.seek ?? null] as const,
+        [connectionId, schema, table, sort, anchor]
+    );
 
-    useEffect(() => {
-        reset();
-    }, [connectionId, table, schema, reset]);
-
-    const loadMore = useCallback(async () => {
-        if (!connectionId || !table || loadingRef.current || !hasMore) return;
-        loadingRef.current = true;
-        setLoading(true);
-        try {
-            const page = await api.queryRows(connectionId, table, {
+    const query = useInfiniteQuery({
+        queryKey,
+        enabled: !!connectionId && !!table,
+        initialPageParam: anchor ? { cursor: null, seek: anchor.seek, index: 0 } : FIRST_PAGE,
+        queryFn: ({ pageParam, signal }) =>
+            api.queryRows(connectionId!, table!, {
                 schema,
                 pageSize: PAGE_SIZE,
-                afterCursor: cursorRef.current,
-            });
-            setRows((prev) => [...prev, ...page.rows]);
-            setColumns((prev) => (prev.length ? prev : page.columns));
-            cursorRef.current = page.nextCursor;
-            setHasMore(page.nextCursor !== null);
-        } catch (err) {
-            setError((err as Error).message);
-        } finally {
-            loadingRef.current = false;
-            setLoading(false);
-        }
-    }, [connectionId, table, schema, hasMore]);
+                afterCursor: pageParam.cursor,
+                seek: pageParam.seek,
+                sort: sort ? [sort] : undefined,
+                signal,
+            }),
+        getNextPageParam: (lastPage, _all, lastParam): PageParam | null =>
+            lastPage.nextCursor ? { cursor: lastPage.nextCursor, seek: null, index: lastParam.index + 1 } : null,
+        // Bounds memory. Dropping from the front is what keeps a long scroll
+        // flat instead of linear in rows visited.
+        maxPages: MAX_PAGES,
+        // Rows are live data behind a realtime channel, not cacheable content
+        // — a stale page shown after a table switch is worse than a refetch.
+        staleTime: 0,
+        gcTime: 30_000,
+        retry: 1,
+    });
 
-    // Kick off first page whenever the target resets.
+    const fetchedRows = useMemo(
+        () => (query.data ? query.data.pages.flatMap((p) => p.rows) : []),
+        [query.data]
+    );
+
+    // Optimistic edits/inserts/deletes and realtime patches are applied to a
+    // local overlay rather than into the query cache, so a background refetch
+    // can replace the page without having to reconcile them.
+    const rows = localRows ?? fetchedRows;
+
+    const columns: ColumnDefinition[] = query.data?.pages[0]?.columns ?? [];
+    const orderBy = query.data?.pages[0]?.orderBy ?? [];
+    const columnsRef = useRef<ColumnDefinition[]>(columns);
+    columnsRef.current = columns;
+
+    // Drop the overlay whenever fresh server data arrives, so it can never
+    // outlive the rows it was patching.
     useEffect(() => {
-        if (connectionId && table) loadMore();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        setLocalRows(null);
+    }, [fetchedRows]);
+
+    // Reset the view — but not the user's sort — when the target changes.
+    useEffect(() => {
+        setAnchor(null);
+        setLocalRows(null);
     }, [connectionId, table, schema]);
 
-    const updateLocalCell = useCallback((rowIndex: number, column: string, value: unknown) => {
-        setRows((prev) => {
-            const next = [...prev];
-            next[rowIndex] = { ...next[rowIndex], [column]: value };
-            return next;
-        });
+    /**
+     * The absolute row number of the first resident row. Zero until pages
+     * start being dropped from the front; unknown (and reported as such) once
+     * the user has jumped to an anchor, since a keyset seek says where a value
+     * is, not how many rows precede it.
+     */
+    // pageParams is typed loosely by react-query's inference here; the params
+    // are exactly the PageParam objects getNextPageParam returns.
+    const firstPageIndex = (query.data?.pageParams as PageParam[] | undefined)?.[0]?.index ?? 0;
+    const windowStartRow = anchor ? null : firstPageIndex * PAGE_SIZE;
+
+    const loadMore = useCallback(() => {
+        if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
+    }, [query.hasNextPage, query.isFetchingNextPage, query.fetchNextPage]);
+
+    /** Jump to the first row at or past `value` on the leading ordering column. */
+    const jumpTo = useCallback(
+        (value: unknown) => {
+            setLocalRows(null);
+            setAnchor({ seek: [value], label: String(value) });
+        },
+        []
+    );
+
+    /** Back to the top of the table, clearing any jump anchor. */
+    const jumpToStart = useCallback(() => {
+        setLocalRows(null);
+        setAnchor(null);
     }, []);
 
-    const prependRow = useCallback((row: Record<string, unknown>) => {
-        setRows((prev) => [row, ...prev]);
+    const changeSort = useCallback((next: TableSort | null) => {
+        setLocalRows(null);
+        setAnchor(null); // a jump anchor is a position in the old ordering
+        setSort(next);
     }, []);
 
-    const removeLocalRowAt = useCallback((rowIndex: number) => {
-        setRows((prev) => prev.filter((_, i) => i !== rowIndex));
-    }, []);
+    const refetchRows = useCallback(() => {
+        setLocalRows(null);
+        void queryClient.invalidateQueries({ queryKey });
+    }, [queryClient, queryKey]);
+
+    const patchRows = useCallback(
+        (fn: (current: Record<string, unknown>[]) => Record<string, unknown>[]) => {
+            setLocalRows((prev) => fn(prev ?? fetchedRows));
+        },
+        [fetchedRows]
+    );
+
+    const updateLocalCell = useCallback(
+        (rowIndex: number, column: string, value: unknown) => {
+            patchRows((current) => {
+                if (!current[rowIndex]) return current;
+                const next = [...current];
+                next[rowIndex] = { ...next[rowIndex], [column]: value };
+                return next;
+            });
+        },
+        [patchRows]
+    );
+
+    const prependRow = useCallback(
+        (row: Record<string, unknown>) => patchRows((current) => [row, ...current]),
+        [patchRows]
+    );
+
+    const removeLocalRowAt = useCallback(
+        (rowIndex: number) => patchRows((current) => current.filter((_, i) => i !== rowIndex)),
+        [patchRows]
+    );
 
     /**
-     * Applies a realtime change event idempotently — safe to call even for
-     * an event this same client just caused via its own optimistic update
-     * (matching by primary key rather than array position, so a duplicate
-     * apply is a harmless no-op rather than a double-edit).
+     * Applies a realtime change event to the local overlay. The matching and
+     * merging rules live in applyRowChange (pure, unit-tested) — see there for
+     * why events are matched by primary key rather than array position.
      */
-    const applyChangeEvent = useCallback((event: RowChangeEvent) => {
-        const pkCols = columnsRef.current.filter((c) => c.isPrimaryKey).map((c) => c.name);
-        if (pkCols.length === 0) return; // can't safely match rows without a known primary key
-
-        const matches = (row: Record<string, unknown>, pk: Record<string, unknown>) =>
-            pkCols.every((c) => c in pk && String(row[c]) === String(pk[c]));
-
-        setRows((prev) => {
-            if (event.type === "insert" && event.row) {
-                if (prev.some((r) => matches(r, event.row!))) return prev;
-                return [event.row, ...prev];
-            }
-            if (event.type === "update" && event.primaryKey) {
-                // MongoDB's change-stream path sends whole-document replacements
-                // (column "__row__") rather than a single field patch.
-                if (event.column === "__row__" && event.value && typeof event.value === "object") {
-                    return prev.map((r) => (matches(r, event.primaryKey!) ? (event.value as Record<string, unknown>) : r));
-                }
-                if (event.column) {
-                    return prev.map((r) => (matches(r, event.primaryKey!) ? { ...r, [event.column!]: event.value } : r));
-                }
-            }
-            if (event.type === "delete" && event.primaryKey) {
-                return prev.filter((r) => !matches(r, event.primaryKey!));
-            }
-            return prev;
-        });
-    }, []);
+    const applyChangeEvent = useCallback(
+        (event: RowChangeEvent) => {
+            const pkCols = columnsRef.current.filter((c) => c.isPrimaryKey).map((c) => c.name);
+            if (pkCols.length === 0) return;
+            patchRows((current) => applyRowChange(current, event, pkCols));
+        },
+        [patchRows]
+    );
 
     return {
         rows,
         columns,
-        loading,
-        hasMore,
-        error,
+        orderBy,
+        sort,
+        changeSort,
+        /** True while the first page of a new target/sort/anchor is loading — the grid shows a skeleton, not an empty table. */
+        initialLoading: query.isPending && !!connectionId && !!table,
+        loading: query.isFetching,
+        loadingMore: query.isFetchingNextPage,
+        hasMore: !!query.hasNextPage,
+        error: query.error ? (query.error as Error).message : null,
         loadMore,
-        reset,
+        refetchRows,
+        jumpTo,
+        jumpToStart,
+        anchorLabel: anchor?.label ?? null,
+        windowStartRow,
+        windowCapped: rows.length >= WINDOW_ROWS,
         updateLocalCell,
         prependRow,
         removeLocalRowAt,

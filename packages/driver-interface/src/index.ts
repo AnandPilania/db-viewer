@@ -135,6 +135,65 @@ export function assertSafeIdentifier(name: string, kind: string): void {
     }
 }
 
+/**
+ * Resolves the ordering tuple for a keyset page: the requested sort columns
+ * first, then any primary-key column not already among them.
+ *
+ * The primary-key tiebreaker is what makes keyset paging safe. Without it two
+ * rows sharing a sort value have no stable relative order, so a page boundary
+ * falling between them can skip rows or serve them twice.
+ *
+ * Every column takes the first sort entry's direction — keyset paging compares
+ * the whole tuple in one operation, which is only valid when the tuple sorts
+ * uniformly. See QueryRowsOptions.sort.
+ */
+export function resolveOrderBy(
+    sort: { column: string; direction: "asc" | "desc" }[] | undefined,
+    pkColumns: string[]
+): { column: string; direction: "asc" | "desc" }[] {
+    const direction: "asc" | "desc" = sort?.[0]?.direction === "desc" ? "desc" : "asc";
+    const columns: string[] = [];
+    for (const entry of sort ?? []) if (!columns.includes(entry.column)) columns.push(entry.column);
+    for (const pk of pkColumns) if (!columns.includes(pk)) columns.push(pk);
+    return columns.map((column) => ({ column, direction }));
+}
+
+/**
+ * Builds the row-wise comparison that advances a keyset page:
+ * `(a, b, pk) > (av, bv, pkv)`, which a database can drive straight off a
+ * matching index — the reason a jump deep into a huge table stays cheap where
+ * OFFSET would scan everything before it.
+ *
+ * `inclusive` distinguishes the two callers: a cursor continues *after* a
+ * known row (exclusive), a seek lands *on* the first row at or past a value
+ * (inclusive). Fewer values than columns is a valid prefix seek.
+ *
+ * Shared across the SQL drivers because getting the operator or the tuple
+ * shape wrong produces silently-wrong pages, not an error.
+ */
+export function keysetComparison(
+    orderColumns: string[],
+    valueCount: number,
+    opts: {
+        descending: boolean;
+        inclusive: boolean;
+        /** Wraps an identifier for the target dialect (double quotes, backticks). */
+        quote: (identifier: string) => string;
+        /** Renders the nth (0-based) bound parameter: `$1`, `?`, ... */
+        placeholder: (index: number) => string;
+    }
+): string {
+    if (valueCount < 1) throw new Error("keysetComparison needs at least one value");
+    if (valueCount > orderColumns.length) {
+        throw new Error(`keysetComparison got ${valueCount} values for ${orderColumns.length} ordering columns`);
+    }
+    const used = orderColumns.slice(0, valueCount);
+    const op = opts.descending ? (opts.inclusive ? "<=" : "<") : opts.inclusive ? ">=" : ">";
+    const placeholders = used.map((_, i) => opts.placeholder(i));
+    if (used.length === 1) return `${opts.quote(used[0])} ${op} ${placeholders[0]}`;
+    return `(${used.map(opts.quote).join(", ")}) ${op} (${placeholders.join(", ")})`;
+}
+
 export interface CursorPage {
     /** Opaque, driver-defined cursor. Callers must not parse this string. */
     cursor: string | null;
@@ -145,9 +204,30 @@ export interface QueryRowsOptions {
     schema?: string;
     columns?: string[]; // omit for all columns
     filters?: QueryFilter[];
+    /**
+     * Sort order. The table's primary key is always appended as a tiebreaker
+     * so paging is deterministic even when the sort column has duplicates.
+     *
+     * All entries share one direction — the first entry's. Keyset pagination
+     * compares the whole ordering tuple at once, which only works when every
+     * column in it sorts the same way; honouring per-column directions would
+     * mean an OR-chain of comparisons per column, and nothing asks for mixed
+     * directions yet.
+     */
     sort?: { column: string; direction: "asc" | "desc" }[];
     pageSize: number;
     afterCursor?: string | null; // keyset pagination — never OFFSET
+    /**
+     * Jump to a position by value instead of by cursor: leading ordering-column
+     * values to start *at* (inclusive), where afterCursor starts *after*
+     * (exclusive). This is how a viewer reaches row ~800 billion without an
+     * OFFSET scan or a chain of cursor fetches — the caller supplies a sort-key
+     * value and the database seeks the index straight to it.
+     *
+     * Fewer values than ordering columns is fine (a prefix seek). Ignored when
+     * afterCursor is set, since a cursor is already a precise position.
+     */
+    seek?: unknown[] | null;
     signal?: AbortSignal;
 }
 
@@ -202,6 +282,13 @@ export interface QueryRowsResult {
     rows: Record<string, unknown>[];
     nextCursor: string | null; // null => no more rows
     columns: ColumnDefinition[];
+    /**
+     * The ordering columns this page was sorted and keyed by, primary-key
+     * tiebreaker included, in order. The UI needs these to know which column
+     * a `seek` value applies to — it can't infer it, since the driver picks
+     * the tiebreaker.
+     */
+    orderBy?: { column: string; direction: "asc" | "desc" }[];
 }
 
 export interface RowCountEstimate {
@@ -363,11 +450,19 @@ export interface DriverConnection {
 
     /**
      * Optional: subscribe to native change notifications for a table (e.g.
-     * MongoDB Change Streams). Only implemented by drivers whose database
-     * supports this without extra setup (triggers, replication config,
-     * etc). Returns an unsubscribe function. Callers must call it exactly
-     * once when no longer interested — drivers that implement this should
-     * treat it as a reference-counted resource internally if needed.
+     * MongoDB Change Streams, Postgres LISTEN/NOTIFY, Redis keyspace
+     * notifications, or poll-and-diff where the database offers nothing).
+     *
+     * Implementations may need server-side setup to deliver this — the
+     * Postgres driver installs a trigger, Redis needs notify-keyspace-events
+     * — so an implementation MUST check `config.readOnly` and degrade to
+     * whatever it can do without writing, rather than running DDL against a
+     * connection the user marked read-only.
+     *
+     * Returns an unsubscribe function. Callers must call it exactly once when
+     * no longer interested — drivers that implement this should treat it as a
+     * reference-counted resource internally if needed. Setup failures must
+     * not reject asynchronously into the caller; degrade quietly instead.
      */
     watchTable?(
         table: string,
@@ -396,4 +491,62 @@ export interface DriverConnection {
     ): Promise<void>;
 
     close(): Promise<void>;
+}
+
+/**
+ * Per-connection cache for schema metadata (column lists, primary keys).
+ *
+ * `queryRows` needs a table's columns and primary key on every call, but
+ * those come from catalog queries that are far more expensive than the data
+ * query itself — `information_schema` lookups in particular. Fetching them
+ * per page turned one keyset page into four or five round-trips, which is
+ * what made even a few hundred rows feel slow, and made a full export do
+ * three catalog queries per 1000 rows.
+ *
+ * TTL'd rather than permanent so a DDL change is picked up without a
+ * restart. Entries are keyed by whatever string the caller builds
+ * (`schema.table`), and `clear()` drops everything on connection close.
+ *
+ * ponytail: single map, no size bound — a connection sees tens to thousands
+ * of tables, not millions. Add an LRU cap if that ever stops being true.
+ */
+export class MetadataCache {
+    private entries = new Map<string, { value: Promise<unknown>; expiresAt: number }>();
+
+    constructor(private ttlMs = 30_000) {}
+
+    /**
+     * Returns the cached value for `key`, or awaits and caches `load()`.
+     *
+     * The *promise* is cached, not the resolved value, so concurrent misses
+     * for the same key share one round-trip instead of each firing their own
+     * (a dashboard opening N widgets against one table, or a schema sweep
+     * requested by several tables at once). A rejection is evicted so a
+     * transient failure isn't cached for the whole TTL.
+     */
+    get<T>(key: string, load: () => Promise<T>): Promise<T> {
+        const hit = this.entries.get(key);
+        if (hit && hit.expiresAt > Date.now()) return hit.value as Promise<T>;
+        const value = load();
+        const entry = { value: value as Promise<unknown>, expiresAt: Date.now() + this.ttlMs };
+        this.entries.set(key, entry);
+        value.catch(() => {
+            if (this.entries.get(key) === entry) this.entries.delete(key);
+        });
+        return value;
+    }
+
+    /** Seeds a key with an already-known value — used when one bulk query resolves many keys at once. */
+    set<T>(key: string, value: T): void {
+        this.entries.set(key, { value: Promise.resolve(value), expiresAt: Date.now() + this.ttlMs });
+    }
+
+    /** Drops one key (call after DDL this process performed), or use clear() for all. */
+    invalidate(key: string): void {
+        this.entries.delete(key);
+    }
+
+    clear(): void {
+        this.entries.clear();
+    }
 }

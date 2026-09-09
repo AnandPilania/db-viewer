@@ -17,7 +17,8 @@ interface Props {
 
 export function QueryEditor({ connectionId, driver }: Props) {
   const [sql, setSql] = useState("SELECT * FROM ");
-  const { columns, rows, state, error, durationMs, run, cancel } = useStreamingQuery(connectionId);
+  const { columns, rows, state, error, durationMs, truncated, received, maxRows, run, cancel } =
+    useStreamingQuery(connectionId);
   const nonSqlEditorRef = useRef<QueryEditorHandle>(null);
 
   const { data: driversInfo } = useQuery({
@@ -118,7 +119,13 @@ export function QueryEditor({ connectionId, driver }: Props) {
 
       <div className="flex items-center gap-3 border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
         {state === "running" && <span>Streaming… {rows.length.toLocaleString()} rows so far</span>}
-        {state === "done" && (
+        {truncated && (
+          <span className="text-amber-500">
+            Stopped at {maxRows.toLocaleString()} rows ({received.toLocaleString()} scanned) — narrow the query, or use
+            Export to pull the whole table.
+          </span>
+        )}
+        {state === "done" && !truncated && (
           <span>
             Done — {rows.length.toLocaleString()} rows in {durationMs?.toFixed(1)}ms
           </span>

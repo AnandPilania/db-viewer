@@ -1,8 +1,11 @@
+import { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { X, Pencil, Radio } from "lucide-react";
 import { ChartRenderer } from "@/components/ChartRenderer";
 import { useTableRealtime } from "@/hooks/useTableRealtime";
 import type { Widget, WidgetData } from "@/lib/api";
+
+const REFETCH_DEBOUNCE_MS = 750;
 
 interface Props {
   id: string;
@@ -42,11 +45,28 @@ export function WidgetCard({
     // incrementally — this poll interval is now just a safety net for
     // changes the realtime channel doesn't (or can't) catch.
     refetchInterval: 30_000,
+    // A widget kept polling while its tab was in the background; a dashboard
+    // left open all day was running its whole aggregate set every 30s for
+    // nobody. The realtime channel covers changes while hidden.
+    refetchIntervalInBackground: false,
   });
 
   const isRealtime = !!(connectionId && table);
+
+  // Debounced: a widget's query is an aggregate over a whole table, so a
+  // burst of row changes (a bulk insert, a migration) must not turn into one
+  // full re-aggregation per changed row. Trailing edge, so the refetch sees
+  // the settled state.
+  const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (refetchTimer.current) clearTimeout(refetchTimer.current);
+  }, []);
+
   useTableRealtime(connectionId ?? null, table ?? null, () => {
-    queryClient.invalidateQueries({ queryKey });
+    if (refetchTimer.current) clearTimeout(refetchTimer.current);
+    refetchTimer.current = setTimeout(() => {
+      void queryClient.invalidateQueries({ queryKey });
+    }, REFETCH_DEBOUNCE_MS);
   });
 
   return (
@@ -87,7 +107,17 @@ export function WidgetCard({
       </div>
       <div className="flex-1 overflow-hidden p-2">
         {isLoading && <div className="flex h-full items-center justify-center text-xs text-muted-foreground">Loading…</div>}
-        {error && <div className="flex h-full items-center justify-center text-xs text-destructive">{(error as Error).message}</div>}
+        {error && (
+          <div className="flex h-full flex-col items-center justify-center gap-2 px-3 text-center text-xs text-destructive">
+            <span>{(error as Error).message}</span>
+            <button
+              onClick={() => void queryClient.invalidateQueries({ queryKey })}
+              className="underline hover:no-underline"
+            >
+              Retry
+            </button>
+          </div>
+        )}
         {data && <ChartRenderer chartType={chartType} data={data} highlightRules={highlightRules} />}
       </div>
     </div>

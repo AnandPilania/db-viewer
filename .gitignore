@@ -9,3 +9,9 @@ build
 .turbo
 *.lock
 .claude
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
+# Local runtime data (connections, keys, scratch databases)
+.data/

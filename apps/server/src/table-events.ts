@@ -40,39 +40,63 @@ tableEvents.setMaxListeners(0); // unbounded — many browser tabs may watch the
 // Refcounted so we only open one native change stream/listener per
 // (connection, table) no matter how many subscribers (browser tabs, embed
 // viewers) are watching it, and close it the moment nobody is.
-const nativeWatchers = new Map<string, { count: number; stop: () => void }>();
+//
+// The *promise* is stored, not the resolved handle: ensureNativeWatch has to
+// await getLive() before it can call watchTable(), and two callers arriving
+// during that await both used to see an empty map, both open a native
+// watcher, and only the second get stored — leaving the first running with
+// no reference and no way to stop it.
+interface NativeWatcher {
+    count: number;
+    ready: Promise<{ stop: () => void } | null>;
+}
+
+const nativeWatchers = new Map<string, NativeWatcher>();
 
 export async function ensureNativeWatch(connectionId: string, table: string): Promise<void> {
     const key = `${connectionId}::${table}`;
     const existing = nativeWatchers.get(key);
     if (existing) {
         existing.count++;
+        await existing.ready;
         return;
     }
+
+    const entry: NativeWatcher = {
+        count: 1,
+        ready: (async () => {
+            const conn = await connectionStore.getLive(connectionId);
+            if (!conn.watchTable) return null; // driver doesn't support native watching
+            const stop = conn.watchTable(table, undefined, (event) => {
+                try {
+                    tableEvents.publish(connectionId, table, event);
+                } catch (err) {
+                    logger.error({ err, connectionId, table }, "Native-watch callback failed");
+                }
+            });
+            return { stop };
+        })(),
+    };
+    nativeWatchers.set(key, entry);
+
     try {
-        const conn = await connectionStore.getLive(connectionId);
-        if (!conn.watchTable) return; // driver doesn't support native watching
-        const stop = conn.watchTable(table, undefined, (event) => {
-            try {
-                tableEvents.publish(connectionId, table, event);
-            } catch (err) {
-                logger.error({ err, connectionId, table }, "Native-watch callback failed");
-            }
-        });
-        nativeWatchers.set(key, { count: 1, stop });
+        await entry.ready;
     } catch (err) {
-        // Connection not available yet — app-originated events still work via tableEvents.
+        // Connection not available yet — app-originated events still work via
+        // tableEvents. Drop the entry so a later subscriber retries instead of
+        // inheriting a permanently-failed watcher.
+        if (nativeWatchers.get(key) === entry) nativeWatchers.delete(key);
         logger.warn({ err, connectionId, table }, "Could not start native table watch");
     }
 }
 
 export function releaseNativeWatch(connectionId: string, table: string): void {
     const key = `${connectionId}::${table}`;
-    const existing = nativeWatchers.get(key);
-    if (!existing) return;
-    existing.count--;
-    if (existing.count <= 0) {
-        existing.stop();
-        nativeWatchers.delete(key);
-    }
+    const entry = nativeWatchers.get(key);
+    if (!entry) return;
+    entry.count--;
+    if (entry.count > 0) return;
+    nativeWatchers.delete(key);
+    // The handle may still be in flight; stop it once it lands either way.
+    entry.ready.then((handle) => handle?.stop()).catch(() => { });
 }

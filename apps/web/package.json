@@ -13,7 +13,6 @@
         "@pilaniaanand/driver-interface": "workspace:*",
         "@tailwindcss/vite": "^4.3.3",
         "@tanstack/react-query": "^5.102.8",
-        "@tanstack/react-table": "^9.2.4",
         "@tanstack/react-virtual": "^3.14.10",
         "clsx": "^2.1.1",
         "dagre": "^0.8.5",
