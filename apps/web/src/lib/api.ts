@@ -24,9 +24,11 @@ const BASE = "/api";
 const seg = (value: string) => encodeURIComponent(value);
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+    const headers = new Headers(init?.headers);
+    if (init?.body != null) headers.set("Content-Type", "application/json");
     const res = await fetch(`${BASE}${path}`, {
-        headers: { "Content-Type": "application/json" },
         ...init,
+        headers,
     });
     const body = await res.json().catch(() => null);
     if (!res.ok) {
@@ -132,6 +134,17 @@ export interface HighlightRule {
     color: string;
 }
 
+export type FilterOperator = "=" | "!=" | ">" | ">=" | "<" | "<=" | "like" | "in" | "is null" | "is not null";
+export type TimeBucket = "day" | "week" | "month" | "quarter" | "year";
+
+export interface WidgetFilter {
+    column: string;
+    /** Defaults to "=" when absent. */
+    op?: FilterOperator;
+    /** Comma-separated for "in"; unused for the null checks. */
+    value: string;
+}
+
 export interface Widget {
     id: string;
     title: string;
@@ -144,7 +157,14 @@ export interface Widget {
     xField2?: string;
     yField?: string;
     aggregation: "count" | "sum" | "avg" | "min" | "max";
-    filters?: { column: string; value: string }[];
+    filters?: WidgetFilter[];
+    /** Groups a date/datetime xField by calendar period instead of by exact timestamp. */
+    xBucket?: TimeBucket;
+    /** Top-N cap, 1–1000. Server default is 50 (500 for tables and scatters). */
+    limit?: number;
+    /** Order grouped results by aggregated value or by group label. */
+    sortBy?: "value" | "label";
+    sortDir?: "asc" | "desc";
     highlightRules?: HighlightRule[];
     createdAt: string;
 }
@@ -170,6 +190,8 @@ export interface Dashboard {
     layout: DashboardLayoutItem[];
     embedEnabled: boolean;
     shareToken: string | null;
+    /** ISO-8601, or null for a non-expiring token. */
+    shareTokenExpiresAt?: string | null;
     createdAt: string;
 }
 
@@ -190,4 +212,5 @@ export const dashboardApi = {
     deleteDashboard: (id: string) => request<void>(`/dashboards/${seg(id)}`, { method: "DELETE" }),
     setEmbed: (id: string, enabled: boolean) =>
         request<Dashboard>(`/dashboards/${seg(id)}/embed`, { method: "POST", body: JSON.stringify({ enabled }) }),
+    rotateEmbedToken: (id: string) => request<Dashboard>(`/dashboards/${seg(id)}/embed/rotate`, { method: "POST" }),
 };

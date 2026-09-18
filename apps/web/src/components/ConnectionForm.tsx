@@ -52,6 +52,7 @@ export function ConnectionForm({ onConnected }: Props) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [readOnly, setReadOnly] = useState(false);
+  const [installCdc, setInstallCdc] = useState(false);
 
   // TLS client-cert auth — for a database that requires (or accepts) certificate-based auth directly.
   const [sslEnabled, setSslEnabled] = useState(false);
@@ -89,6 +90,7 @@ export function ConnectionForm({ onConnected }: Props) {
             username: username || undefined,
             password: password || undefined,
             readOnly: readOnly || undefined,
+            installCdc: installCdc || undefined,
             ssl: sslEnabled
               ? {
                   enabled: true,
@@ -139,6 +141,27 @@ export function ConnectionForm({ onConnected }: Props) {
           <input type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} />
           Read-only connection (block writes)
         </label>
+
+        {/* Only Postgres and Redis have a CDC path that writes to the target
+            server; every other driver detects changes read-only already. */}
+        {(driver === "postgres" || driver === "redis") && !readOnly && (
+          <label
+            className="flex items-start gap-2 text-xs text-muted-foreground"
+            title={
+              driver === "postgres"
+                ? "Creates a trigger and function on each table you watch, and drops them on disconnect. Needs DDL rights and, in a regulated environment, change-control approval. Left off, changes are detected by polling instead."
+                : "Runs CONFIG SET notify-keyspace-events on the server, which affects every client of that instance. Left off, we subscribe to whatever the server already emits."
+            }
+          >
+            <input type="checkbox" checked={installCdc} onChange={(e) => setInstallCdc(e.target.checked)} />
+            <span>
+              Allow live-updates setup on the server
+              <span className="block text-[10px] opacity-70">
+                {driver === "postgres" ? "Installs a trigger per watched table" : "Changes a server-wide Redis setting"}
+              </span>
+            </span>
+          </label>
+        )}
 
         {driver === "sqlite" ? (
           <div className="space-y-1">

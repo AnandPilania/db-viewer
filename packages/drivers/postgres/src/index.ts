@@ -4,6 +4,7 @@ import Cursor from "pg-cursor";
 import {
     resolveSsl,
     assertSafeIdentifier,
+    diffTableSnapshots,
     keysetComparison,
     MetadataCache,
     resolveOrderBy,
@@ -25,6 +26,10 @@ import {
 } from "@pilaniaanand/driver-interface";
 
 const { Pool } = pg;
+
+// Only used by the no-DDL fallback watcher (see watchTable).
+const POLL_INTERVAL_MS = 1000;
+const WATCH_ROW_LIMIT = 1000;
 
 // Only these ever reach the "else" branch below (is_null/is_not_null/in are
 // handled separately) — anything else is a request body forged past the
@@ -69,6 +74,7 @@ class PostgresConnection implements DriverConnection {
     private listenerSetupPromise: Promise<void> | null = null;
     private watchHandlers = new Map<string, Set<(event: RowChangeEvent) => void>>();
     private triggersInstalled = new Set<string>();
+    private watchIntervals = new Map<string, ReturnType<typeof setInterval>>();
     private metadata = new MetadataCache();
 
     /**
@@ -80,10 +86,19 @@ class PostgresConnection implements DriverConnection {
      */
     private readOnly: boolean;
 
-    constructor(id: string, pool: pg.Pool, readOnly = false) {
+    /**
+     * Whether the user explicitly opted this connection in to trigger-based
+     * CDC. Off by default: installing a trigger into someone else's database
+     * is a schema change they did not ask for and cannot see from this app.
+     */
+    private installCdc: boolean;
+
+    constructor(id: string, pool: pg.Pool, readOnly = false, installCdc = false) {
         this.id = id;
         this.pool = pool;
         this.readOnly = readOnly;
+        // A read-only connection never writes DDL, whatever the CDC flag says.
+        this.installCdc = installCdc && !readOnly;
     }
 
     async listSchemas(): Promise<SchemaSummary[]> {
@@ -91,12 +106,15 @@ class PostgresConnection implements DriverConnection {
             `SELECT schema_name FROM information_schema.schemata
        WHERE schema_name NOT IN ('pg_catalog', 'information_schema') ORDER BY schema_name`
         );
-        const summaries: SchemaSummary[] = [];
-        for (const r of rows) {
-            const tables = await this.listTables(r.schema_name);
-            summaries.push({ name: r.schema_name, tables: tables.map((t) => ({ schema: t.schema, name: t.name, kind: t.kind })) });
-        }
-        return summaries;
+        // In parallel: the per-schema sweeps are independent, and doing them in
+        // sequence made the sidebar's first paint the sum of every schema's
+        // catalog query rather than the slowest one.
+        return Promise.all(
+            rows.map(async (r) => {
+                const tables = await this.listTables(r.schema_name);
+                return { name: r.schema_name, tables: tables.map((t) => ({ schema: t.schema, name: t.name, kind: t.kind })) };
+            })
+        );
     }
 
     async listTables(schema = "public"): Promise<TableDefinition[]> {
@@ -443,22 +461,30 @@ class PostgresConnection implements DriverConnection {
     }
 
     /**
-     * Real CDC for Postgres: installs a trigger (idempotent — safe to call
-     * repeatedly) that calls `pg_notify` on every row change, then LISTENs on
-     * a single shared channel for the whole connection. This means external
-     * writes (a row inserted directly in psql, by another application, etc.)
-     * are picked up too, not just changes made through this app's own API.
+     * Trigger-based CDC for Postgres, but ONLY when the connection opted in
+     * via `installCdc`. That path installs a trigger (idempotent — safe to
+     * call repeatedly) that calls `pg_notify` on every row change, then
+     * LISTENs on a single shared channel for the whole connection, so
+     * external writes (a row inserted directly in psql, by another
+     * application) are picked up too.
      *
      * One dedicated LISTEN connection is shared across every table this
      * connection watches — Postgres requires a persistent connection for
      * LISTEN (it can't come from the query pool), so we only want one, not
      * one per table.
+     *
+     * Without that opt-in — the default — we do NOT touch the user's schema,
+     * and fall back to the same read-only poll-and-diff MySQL uses. Slower to
+     * notice a change and capped at WATCH_ROW_LIMIT rows, but it leaves no
+     * trace in a database this app does not own.
      */
     watchTable(table: string, schema: string | undefined, onChange: (event: RowChangeEvent) => void): () => void {
         const s = schema ?? "public";
         assertSafeIdentifier(table, "table");
         assertSafeIdentifier(s, "schema");
         const key = `${s}.${table}`;
+
+        if (!this.installCdc) return this.watchByPolling(s, table, onChange);
 
         if (!this.watchHandlers.has(key)) this.watchHandlers.set(key, new Set());
         this.watchHandlers.get(key)!.add(onChange);
@@ -479,13 +505,47 @@ class PostgresConnection implements DriverConnection {
         };
     }
 
+    /**
+     * ponytail: poll-and-diff, the same approach the MySQL driver uses — no
+     * writes of any kind to the target database. Ceiling: it only sees the
+     * first WATCH_ROW_LIMIT rows and notices a change up to POLL_INTERVAL_MS
+     * late. Set `installCdc` on the connection for true CDC once a DBA has
+     * signed off on the trigger.
+     */
+    private watchByPolling(schema: string, table: string, onChange: (event: RowChangeEvent) => void): () => void {
+        const key = `${schema}.${table}`;
+        let lastRows: Record<string, unknown>[] | null = null;
+        let stopped = false;
+
+        const poll = async () => {
+            const pkCols = await this.metadata.get(`pk:${key}`, () => this.primaryKeyColumns(table, schema));
+            const { rows } = await this.pool.query(`SELECT * FROM "${schema}"."${table}" LIMIT ${WATCH_ROW_LIMIT}`);
+            if (stopped) return;
+            // The first poll only establishes a baseline — diffing against
+            // nothing would replay the whole table as inserts.
+            if (lastRows) for (const event of diffTableSnapshots(lastRows, rows, pkCols)) onChange(event);
+            lastRows = rows;
+        };
+
+        const onPollError = (err: unknown) =>
+            console.error(`Postgres table-watch poll failed for "${key}":`, (err as Error).message);
+        void poll().catch(onPollError);
+        const interval = setInterval(() => void poll().catch(onPollError), POLL_INTERVAL_MS);
+        this.watchIntervals.set(key, interval);
+
+        return () => {
+            stopped = true;
+            clearInterval(interval);
+            this.watchIntervals.delete(key);
+        };
+    }
+
     private async ensureListening(schema: string, table: string): Promise<void> {
         const triggerKey = `${schema}.${table}`;
-        // Read-only connections get the LISTEN half only: if something else
-        // already installed the trigger the notifications still arrive, but
-        // this process will not write DDL to a database the user told it not
-        // to write to.
-        if (!this.readOnly && !this.triggersInstalled.has(triggerKey)) {
+        // Only reachable with installCdc set (which already excludes
+        // read-only connections) — watchTable routes everything else to the
+        // no-DDL poller before it gets here.
+        if (!this.triggersInstalled.has(triggerKey)) {
             await this.pool.query(`
         CREATE OR REPLACE FUNCTION __dbviewer_notify_change() RETURNS TRIGGER AS $$
         DECLARE
@@ -578,6 +638,8 @@ class PostgresConnection implements DriverConnection {
 
     async close(): Promise<void> {
         this.metadata.clear();
+        for (const interval of this.watchIntervals.values()) clearInterval(interval);
+        this.watchIntervals.clear();
         for (const key of this.triggersInstalled) {
             const [schema, table] = key.split(".");
             await this.pool.query(`DROP TRIGGER IF EXISTS __dbviewer_watch ON "${schema}"."${table}"`).catch(() => {});
@@ -626,7 +688,7 @@ export const postgresDriver: DatabaseDriver = {
             ssl: toPgSsl(config),
             max: 10,
         });
-        return new PostgresConnection(config.id, pool, !!config.readOnly || process.env.DB_VIEWER_READ_ONLY === "true");
+        return new PostgresConnection(config.id, pool, !!config.readOnly || process.env.DB_VIEWER_READ_ONLY === "true", !!config.installCdc);
     },
 };
 

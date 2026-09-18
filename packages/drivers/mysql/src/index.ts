@@ -89,16 +89,67 @@ class MysqlConnection implements DriverConnection {
        FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?`,
             [this.database]
         );
+        // Two catalog queries for the whole database, not two per table. Drawing
+        // the schema sidebar used to cost 2N round-trips, which on a database
+        // with a few thousand tables is minutes of information_schema scans.
+        const columnsByTable = await this.schemaColumns();
         const tables: TableDefinition[] = [];
         for (const r of rows) {
             tables.push({
                 name: r.name,
                 kind: r.type === "VIEW" ? "view" : "table",
-                columns: await this.describeColumns(r.name),
+                columns: columnsByTable.get(r.name) ?? [],
                 estimatedRowCount: Number(r.estimate) || 0,
             });
         }
         return tables;
+    }
+
+    /**
+     * Every column and foreign key in the database in two catalog queries,
+     * grouped by table. Each table's entry is seeded into the metadata cache
+     * on the way out, so the per-table describeColumns() calls that follow
+     * (queryRows, describeTable, primaryKeyColumns) are all cache hits.
+     */
+    private schemaColumns(): Promise<Map<string, ColumnDefinition[]>> {
+        return this.metadata.get("schema-cols", async () => {
+            const [[cols], [fks]] = await Promise.all([
+                this.pool.query<RowDataPacket[]>(
+                    `SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name, DATA_TYPE AS dataType, IS_NULLABLE AS nullable,
+                  COLUMN_KEY AS colKey, COLUMN_DEFAULT AS defaultValue
+           FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION`,
+                    [this.database]
+                ),
+                this.pool.query<RowDataPacket[]>(
+                    `SELECT TABLE_NAME AS tbl, COLUMN_NAME AS col, REFERENCED_TABLE_NAME AS refTable,
+                  REFERENCED_COLUMN_NAME AS refCol
+           FROM information_schema.KEY_COLUMN_USAGE
+           WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME IS NOT NULL`,
+                    [this.database]
+                ),
+            ]);
+
+            const fkMap = new Map(fks.map((f) => [`${f.tbl}.${f.col}`, f]));
+            const byTable = new Map<string, ColumnDefinition[]>();
+            for (const c of cols) {
+                const fk = fkMap.get(`${c.tbl}.${c.name}`);
+                const list = byTable.get(c.tbl) ?? [];
+                list.push({
+                    name: c.name,
+                    type: mapMysqlType(c.dataType),
+                    nativeType: c.dataType,
+                    nullable: c.nullable === "YES",
+                    isPrimaryKey: c.colKey === "PRI",
+                    isForeignKey: !!fk,
+                    references: fk ? { table: fk.refTable, column: fk.refCol } : undefined,
+                    defaultValue: c.defaultValue,
+                });
+                byTable.set(c.tbl, list);
+            }
+            for (const [table, list] of byTable) this.metadata.set(`cols:${table}`, list);
+            return byTable;
+        });
     }
 
     /** Cached wrapper — these are information_schema queries; re-running them per keyset page dominated paging cost. */

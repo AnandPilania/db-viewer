@@ -15,3 +15,6 @@ build
 
 # Local runtime data (connections, keys, scratch databases)
 .data/
+
+# Application and audit logs
+logs/

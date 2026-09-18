@@ -1,13 +1,22 @@
 import { useCallback, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { GridLayout, useContainerWidth, type Layout } from "react-grid-layout";
-import { Plus, Share2, Copy, Check } from "lucide-react";
+import { Plus, Share2, Copy, Check, RotateCw } from "lucide-react";
 import { dashboardApi, type Widget } from "@/lib/api";
 import { WidgetForm } from "@/components/WidgetForm";
 import { WidgetCard } from "@/components/WidgetCard";
 import { Button } from "@/components/ui/button";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
+
+/** An expired link fails with a 403 the embedder can't diagnose, so say when it lapses before it does. */
+function embedExpiryLabel(expiresAt: string | null | undefined): string {
+  if (!expiresAt) return "never expires";
+  const days = Math.ceil((Date.parse(expiresAt) - Date.now()) / 86_400_000);
+  if (days < 0) return "expired — rotate to re-enable";
+  if (days === 0) return "expires today";
+  return `expires in ${days}d`;
+}
 
 interface Props {
   dashboardId: string;
@@ -51,6 +60,14 @@ export function DashboardBuilder({ dashboardId, onBack }: Props) {
   async function toggleEmbed() {
     if (!dashboard) return;
     await dashboardApi.setEmbed(dashboardId, !dashboard.embedEnabled);
+    queryClient.invalidateQueries({ queryKey: ["dashboard", dashboardId] });
+  }
+
+  async function rotateEmbedToken() {
+    if (!dashboard) return;
+    // Deliberately confirmed: this breaks every link already handed out.
+    if (!window.confirm("Rotate this embed token? Any link already shared will stop working immediately.")) return;
+    await dashboardApi.rotateEmbedToken(dashboardId);
     queryClient.invalidateQueries({ queryKey: ["dashboard", dashboardId] });
   }
 
@@ -111,9 +128,17 @@ export function DashboardBuilder({ dashboardId, onBack }: Props) {
             <Share2 size={12} /> {dashboard.embedEnabled ? "Embedding on" : "Enable embed"}
           </Button>
           {dashboard.embedEnabled && (
-            <Button size="sm" variant="ghost" onClick={copyEmbedCode}>
-              {copied ? <Check size={12} /> : <Copy size={12} />} Copy embed code
-            </Button>
+            <>
+              <Button size="sm" variant="ghost" onClick={copyEmbedCode}>
+                {copied ? <Check size={12} /> : <Copy size={12} />} Copy embed code
+              </Button>
+              <Button size="sm" variant="ghost" onClick={rotateEmbedToken} title="Issue a new token and invalidate the current link">
+                <RotateCw size={12} /> Rotate token
+              </Button>
+              <span className="text-[10px] text-muted-foreground" title={dashboard.shareTokenExpiresAt ?? undefined}>
+                {embedExpiryLabel(dashboard.shareTokenExpiresAt)}
+              </span>
+            </>
           )}
           <Button size="sm" onClick={() => setShowForm(true)}>
             <Plus size={12} /> Add widget

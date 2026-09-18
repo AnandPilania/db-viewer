@@ -105,6 +105,24 @@ export interface ConnectionConfig {
      * layer this app cannot bypass no matter what.
      */
     readOnly?: boolean;
+    /**
+     * Opt in to change-data-capture that MODIFIES the target server to work.
+     * Off by default, and deliberately so: on Postgres it means CREATE
+     * FUNCTION + CREATE TRIGGER on the watched table (a schema change an
+     * auditor will find, firing on every write from every application, not
+     * just this one), and on Redis a server-global CONFIG SET that affects
+     * every other client of that instance. Installing either into a customer
+     * database without an explicit, recorded decision is a change-control
+     * violation in most regulated environments.
+     *
+     * Left off, drivers fall back to read-only change detection: poll-and-diff
+     * on Postgres, and on Redis a plain subscribe that picks up events if an
+     * admin has already enabled keyspace notifications. Changes made through
+     * this app are broadcast to every viewer either way.
+     *
+     * Ignored when `readOnly` is set.
+     */
+    installCdc?: boolean;
     extra?: Record<string, unknown>; // driver-specific overflow (e.g. mongo replica set opts)
 }
 
@@ -455,9 +473,10 @@ export interface DriverConnection {
      *
      * Implementations may need server-side setup to deliver this — the
      * Postgres driver installs a trigger, Redis needs notify-keyspace-events
-     * — so an implementation MUST check `config.readOnly` and degrade to
-     * whatever it can do without writing, rather than running DDL against a
-     * connection the user marked read-only.
+     * — so an implementation MUST check BOTH `config.readOnly` and
+     * `config.installCdc` and degrade to whatever it can do without writing,
+     * rather than running DDL (or changing server-global settings) against a
+     * database the user has not explicitly opted in.
      *
      * Returns an unsubscribe function. Callers must call it exactly once when
      * no longer interested — drivers that implement this should treat it as a

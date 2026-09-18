@@ -132,19 +132,24 @@ class ClickHouseConnection implements DriverConnection {
 
     async listSchemas(): Promise<SchemaSummary[]> {
         const dbs = await this.httpQuery("SELECT name FROM system.databases FORMAT JSON");
-        const summaries: SchemaSummary[] = [];
-        for (const row of dbs.data) {
-            const name = String(row.name);
-            const tables = await this.listTablesIn(name);
-            summaries.push({ name, tables: tables.map((t) => ({ schema: name, name: t.name, kind: t.kind })) });
-        }
-        return summaries;
+        // In parallel — each database's sweep is independent, and in sequence
+        // the sidebar's first paint cost the sum of all of them.
+        return Promise.all(
+            dbs.data.map(async (row) => {
+                const name = String(row.name);
+                const tables = await this.listTablesIn(name);
+                return { name, tables: tables.map((t) => ({ schema: name, name: t.name, kind: t.kind })) };
+            })
+        );
     }
 
     private async listTablesIn(database: string): Promise<TableDefinition[]> {
         const result = await this.httpQuery(
             `SELECT name, engine FROM system.tables WHERE database = ${toLiteral(database)} FORMAT JSON`
         );
+        // One system.columns sweep for the database, not one per table —
+        // listing a database used to cost N+1 HTTP round-trips.
+        const columnsByTable = await this.schemaColumns(database);
         const tables: TableDefinition[] = [];
         for (const row of result.data) {
             const name = String(row.name);
@@ -152,10 +157,41 @@ class ClickHouseConnection implements DriverConnection {
                 schema: database,
                 name,
                 kind: String(row.engine).includes("View") ? "view" : "table",
-                columns: await this.describeColumns(database, name),
+                columns: columnsByTable.get(name) ?? [],
             });
         }
         return tables;
+    }
+
+    /**
+     * Every column in a database in one query, grouped by table and seeded
+     * into the metadata cache so the per-table describeColumns() calls that
+     * follow are cache hits.
+     */
+    private schemaColumns(database: string): Promise<Map<string, ColumnDefinition[]>> {
+        return this.metadata.get(`schema-cols:${database}`, async () => {
+            const result = await this.httpQuery(
+                `SELECT table, name, type, is_in_primary_key FROM system.columns ` +
+                `WHERE database = ${toLiteral(database)} ORDER BY table, position FORMAT JSON`
+            );
+            const byTable = new Map<string, ColumnDefinition[]>();
+            for (const r of result.data) {
+                const { type, nullable } = mapClickHouseType(String(r.type));
+                const table = String(r.table);
+                const list = byTable.get(table) ?? [];
+                list.push({
+                    name: String(r.name),
+                    type,
+                    nativeType: String(r.type),
+                    nullable,
+                    isPrimaryKey: Number(r.is_in_primary_key) === 1,
+                    isForeignKey: false, // ClickHouse has no foreign key concept
+                });
+                byTable.set(table, list);
+            }
+            for (const [table, list] of byTable) this.metadata.set(`cols:${database}.${table}`, list);
+            return byTable;
+        });
     }
 
     async listTables(schema?: string): Promise<TableDefinition[]> {

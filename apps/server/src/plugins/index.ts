@@ -1,3 +1,4 @@
+export { default as auditPlugin } from "./audit.js";
 export { default as corsPlugin } from "./cors.js";
 export { default as websocketPlugin } from "./websocket.js";
 export { default as rateLimitPlugin } from "./rate-limit.js";

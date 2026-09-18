@@ -35,6 +35,11 @@ export function authorizeEmbed(
   if (!tokenMatches(token, dashboard.shareToken)) {
     return { ok: false, status: 403, error: "Invalid or missing embed token" };
   }
+  // Checked after the token compare so an expiry message can't be used to
+  // confirm that a guessed token was otherwise correct.
+  if (dashboard.shareTokenExpiresAt && Date.parse(dashboard.shareTokenExpiresAt) < Date.now()) {
+    return { ok: false, status: 403, error: "This embed link has expired — rotate the token to issue a new one" };
+  }
   return { ok: true };
 }
 
@@ -90,12 +95,24 @@ export async function dashboardRoutes(app: FastifyInstance) {
     }
   });
 
+  app.post("/api/dashboards/:id/embed/rotate", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      return dashboardStore.rotateShareToken(id);
+    } catch (err) {
+      reply.code(400);
+      return { error: (err as Error).message };
+    }
+  });
+
   // --- Public embed endpoints ---
   // See authorizeEmbed() above for the trust-boundary rationale.
 
   app.get("/api/public/dashboards/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
     const { token } = req.query as { token?: string };
+    // Token-gated data reached via a URL: keep it out of shared and browser caches.
+    reply.header("Cache-Control", "no-store");
     const auth = authorizeEmbed(id, token);
     if (!auth.ok) {
       reply.code(auth.status);
@@ -119,6 +136,7 @@ export async function dashboardRoutes(app: FastifyInstance) {
   });
 
   app.get("/api/public/dashboards/:id/widgets/:widgetId/data", async (req, reply) => {
+    reply.header("Cache-Control", "no-store");
     const { id, widgetId } = req.params as { id: string; widgetId: string };
     const { token } = req.query as { token?: string };
     const auth = authorizeEmbed(id, token);

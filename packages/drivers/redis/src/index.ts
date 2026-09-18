@@ -63,7 +63,17 @@ class RedisConnection implements DriverConnection {
   private priorNotifyKeyspaceEvents: string | null = null;
   private watchHandlers = new Map<RedisKeyType, Set<(event: RowChangeEvent) => void>>();
 
-  constructor(id: string, client: RedisClientType) {
+  /**
+   * Whether the user opted this connection in to us enabling keyspace
+   * notifications ourselves. Off by default: `CONFIG SET
+   * notify-keyspace-events` is a SERVER-GLOBAL change affecting every other
+   * client of the instance, and a crash skips the restore in close()
+   * entirely, so it can outlive this process.
+   */
+  private installCdc: boolean;
+
+  constructor(id: string, client: RedisClientType, installCdc = false) {
+    this.installCdc = installCdc;
     this.id = id;
     this.client = client;
   }
@@ -357,7 +367,13 @@ class RedisConnection implements DriverConnection {
         // if the server denies it (some managed Redis providers lock this
         // down), we log and simply get no native events — app-originated
         // events still work via the WebSocket broadcast layer regardless.
-        const current = await this.client.configGet("notify-keyspace-events");
+        // Without the opt-in we subscribe and take whatever the server is
+        // already configured to emit — nothing, if the admin has not enabled
+        // notifications. Changes made through this app still reach every
+        // viewer via the server's own event bus.
+        const current = this.installCdc
+          ? await this.client.configGet("notify-keyspace-events")
+          : { "notify-keyspace-events": "" };
         const currentValue = current["notify-keyspace-events"] ?? "";
         // If a crash (kill -9, OOM, power loss) skips close() entirely, this
         // setting is left however we set it — there's no way to run cleanup
@@ -366,7 +382,7 @@ class RedisConnection implements DriverConnection {
         // there and does nothing, instead of re-capturing our own leftover
         // value as the new "original" to restore later, and (b) we never
         // overwrite another admin's already-adequate setting.
-        if (!currentValue.includes("E") || !currentValue.includes("A")) {
+        if (this.installCdc && (!currentValue.includes("E") || !currentValue.includes("A"))) {
           this.priorNotifyKeyspaceEvents = currentValue;
           await this.client.configSet("notify-keyspace-events", "KEA");
         }
@@ -460,7 +476,7 @@ export const redisDriver: DatabaseDriver = {
     // UI rather than retry forever in the background.
     const client: RedisClientType = createClient({ url: buildUrl(config), socket: { reconnectStrategy: false } });
     await client.connect();
-    return new RedisConnection(config.id, client);
+    return new RedisConnection(config.id, client, !!config.installCdc);
   },
 };
 

@@ -71,7 +71,7 @@ describe("validateWidgetInput", () => {
 
   it("normalises filter values to strings and checks filter columns", () => {
     const widget = validateWidgetInput({ ...valid, filters: [{ column: "status", value: 3 }] });
-    expect(widget.filters).toEqual([{ column: "status", value: "3" }]);
+    expect(widget.filters).toEqual([{ column: "status", op: "=", value: "3" }]);
     expect(() => validateWidgetInput({ ...valid, filters: [{ column: "a b", value: "x" }] })).toThrow();
     expect(() => validateWidgetInput({ ...valid, filters: [{ column: "status", value: { $ne: 1 } }] })).toThrow();
   });

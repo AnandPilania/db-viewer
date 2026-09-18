@@ -13,10 +13,13 @@ export type TableChangeEvent = RowChangeEvent;
  *
  * `ensureNativeWatch` below also feeds each driver's own change detection
  * into this same bus, so writes made *outside* the app are picked up too:
- * Postgres (auto-installed trigger + LISTEN/NOTIFY), Redis (keyspace
- * notifications), MongoDB (Change Streams), and SQLite/MySQL/ClickHouse
- * (poll-and-diff — none of the three have a low-effort native push
- * mechanism, so they re-check the table on an interval instead).
+ * MongoDB (Change Streams) and SQLite/MySQL/ClickHouse/Postgres
+ * (poll-and-diff on an interval).
+ *
+ * Postgres (trigger + LISTEN/NOTIFY) and Redis (keyspace notifications) can
+ * do better, but both need us to modify the target server to get there, so
+ * they are opt-in per connection via `installCdc` and fall back to the
+ * read-only paths above. See ConnectionConfig.installCdc.
  */
 class TableEventBus extends EventEmitter {
     private key(connectionId: string, table: string): string {
