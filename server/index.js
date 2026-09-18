@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { corsPlugin, websocketPlugin, rateLimitPlugin, errorHandlerPlugin, gracefulShutdownPlugin, staticFrontendPlugin, } from "./plugins/index.js";
+import { auditPlugin, corsPlugin, websocketPlugin, rateLimitPlugin, errorHandlerPlugin, gracefulShutdownPlugin, staticFrontendPlugin, } from "./plugins/index.js";
 import { connectionRoutes } from "./routes/connections.js";
 import { streamRoutes } from "./routes/stream.js";
 import { exportRoutes } from "./routes/export.js";
@@ -10,6 +10,7 @@ import { publicWatchRoutes } from "./routes/public-watch.js";
 import { clientErrorRoutes } from "./routes/client-errors.js";
 import { registry } from "./registry.js";
 import { logger } from "./logger.js";
+import { usingLocalKeyFile } from "./crypto.js";
 // Anything that reaches here would otherwise crash the process silently (or
 // with only a stdout stack trace lost the moment the terminal closes) — log
 // it to the daily file first. An uncaught exception leaves the process in an
@@ -40,6 +41,7 @@ if (missing.length > 0) {
 }
 await app.register(errorHandlerPlugin);
 await app.register(gracefulShutdownPlugin);
+await app.register(auditPlugin);
 await app.register(rateLimitPlugin);
 await app.register(corsPlugin);
 await app.register(websocketPlugin);
@@ -56,6 +58,10 @@ app.get("/api/health", async () => ({ ok: true }));
 // errorHandlerPlugin's JSON 404 — but only once a built frontend is
 // actually found (see the plugin for details).
 await app.register(staticFrontendPlugin);
+if (usingLocalKeyFile) {
+    app.log.warn("Database passwords are encrypted with a key generated in .data/secret.key — on the same disk as the data it protects. " +
+        "Set DB_VIEWER_SECRET_KEY (openssl rand -hex 32) or DB_VIEWER_SECRET_KEY_FILE for anything shared or deployed.");
+}
 const port = Number(process.env.PORT ?? 4000);
 // Loopback by default. This process holds decrypted credentials for every
 // configured database and has no authentication of its own, so binding all

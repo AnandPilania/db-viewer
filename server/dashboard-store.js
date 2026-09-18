@@ -5,6 +5,15 @@ import { nanoid } from "nanoid";
 import { DATA_DIR } from "./crypto.js";
 import { logger } from "./logger.js";
 const STORE_PATH = path.join(DATA_DIR, "dashboards.json");
+/** Days a new embed token stays valid. 0 disables expiry, for a permanently embedded dashboard. */
+const DEFAULT_TOKEN_TTL_DAYS = 30;
+function tokenExpiry() {
+    const raw = process.env.DB_VIEWER_EMBED_TOKEN_TTL_DAYS;
+    const days = raw === undefined ? DEFAULT_TOKEN_TTL_DAYS : Number(raw);
+    if (!Number.isFinite(days) || days <= 0)
+        return null;
+    return new Date(Date.now() + days * 86_400_000).toISOString();
+}
 class DashboardStore {
     dashboards = new Map();
     constructor() {
@@ -61,7 +70,27 @@ class DashboardStore {
     setEmbedEnabled(id, enabled) {
         const d = this.get(id);
         d.embedEnabled = enabled;
-        d.shareToken = enabled ? crypto.randomBytes(24).toString("hex") : null;
+        if (enabled)
+            return this.issueToken(d);
+        d.shareToken = null;
+        d.shareTokenExpiresAt = null;
+        this.save();
+        return d;
+    }
+    /**
+     * Issues a fresh token and invalidates the previous one immediately. This
+     * is the revocation path: a link that leaked into a wiki, a chat, or a
+     * browser history stops working the moment this is called.
+     */
+    rotateShareToken(id) {
+        const d = this.get(id);
+        if (!d.embedEnabled)
+            throw new Error("Embedding is not enabled for this dashboard");
+        return this.issueToken(d);
+    }
+    issueToken(d) {
+        d.shareToken = crypto.randomBytes(24).toString("hex");
+        d.shareTokenExpiresAt = tokenExpiry();
         this.save();
         return d;
     }

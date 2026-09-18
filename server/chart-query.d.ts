@@ -8,11 +8,11 @@ export interface WidgetData {
     x2Key?: string;
 }
 /**
- * Builds and runs the SQL for a widget's chart, validating every column
- * name the widget references against the table's real, driver-reported
- * schema first. SQL has no parameterized-identifier syntax (only values
- * can be bound with $1/?), so this allowlist check is what stands in for
- * that — a widget can only ever reference a table/column that genuinely
- * exists, never arbitrary interpolated text.
+ * Runs a widget's query, coalescing concurrent and near-repeat requests.
+ *
+ * Keyed on the widget's full definition rather than its id, so editing a
+ * widget takes effect immediately instead of after the TTL — and on the
+ * connection id, so two widgets that differ only by connection never share
+ * a result.
  */
 export declare function fetchWidgetData(conn: DriverConnection, config: ConnectionConfig, widget: Widget): Promise<WidgetData>;
