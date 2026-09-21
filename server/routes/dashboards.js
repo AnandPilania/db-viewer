@@ -37,6 +37,33 @@ export function authorizeEmbed(dashboardId, token) {
     }
     return { ok: true };
 }
+/**
+ * A dashboard mixing widgets from several connections is fine (Metabase/
+ * Grafana/Superset all do it — each card is independently sourced, nothing
+ * joins across connections) EXCEPT that an embedded dashboard's share token
+ * grants read access to every connection its widgets touch. So mixing is
+ * only allowed when every connection involved has opted in via
+ * `allowMultiDbDashboards`; a dashboard whose widgets all share one
+ * connection is unaffected either way.
+ */
+function assertConnectionsAllowMixing(layout) {
+    const connectionIds = new Set();
+    for (const item of layout) {
+        try {
+            connectionIds.add(widgetStore.get(item.widgetId).connectionId);
+        }
+        catch {
+            // Dangling widget id — ignored here, same as elsewhere in this file.
+        }
+    }
+    if (connectionIds.size <= 1)
+        return;
+    for (const id of connectionIds) {
+        if (!connectionStore.getConfig(id).allowMultiDbDashboards) {
+            throw new Error(`This dashboard mixes multiple connections, but "${id}" hasn't opted into multi-database dashboards. Enable it on the connection, or keep this dashboard to widgets from one connection.`);
+        }
+    }
+}
 export async function dashboardRoutes(app) {
     app.get("/api/dashboards", async () => dashboardStore.list());
     app.post("/api/dashboards", async (req, reply) => {
@@ -63,8 +90,10 @@ export async function dashboardRoutes(app) {
         try {
             if (body.title !== undefined)
                 dashboardStore.updateTitle(id, body.title);
-            if (body.layout !== undefined)
+            if (body.layout !== undefined) {
+                assertConnectionsAllowMixing(body.layout);
                 dashboardStore.updateLayout(id, body.layout);
+            }
             return dashboardStore.get(id);
         }
         catch (err) {

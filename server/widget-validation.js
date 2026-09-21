@@ -144,7 +144,6 @@ export function validateWidgetInput(raw) {
         highlightRules: validateHighlightRules(body.highlightRules),
     };
 }
-/** PATCH bodies are partial — validate the merged result so a patch can't sneak a bad field past the full check. */
 export function validateWidgetPatch(existing, patch) {
     if (!patch || typeof patch !== "object")
         throw new Error("Request body must be a widget patch object");

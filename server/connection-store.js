@@ -117,6 +117,66 @@ class ConnectionStore {
         this.saveToDisk();
         return redact(config);
     }
+    /** Only patch keys that are actually present are applied — `undefined` means "leave as-is", so a client can omit a secret it isn't changing without wiping it. */
+    async update(id, patch) {
+        const entry = this.connections.get(id);
+        if (!entry)
+            throw new Error(`Unknown connection "${id}"`);
+        const config = { ...entry.config };
+        for (const [key, value] of Object.entries(patch)) {
+            if (value !== undefined)
+                config[key] = value;
+        }
+        const driver = registry.get(config.driver);
+        const test = await driver.testConnection(await this.withTunnel(config));
+        if (!test.ok)
+            throw new Error(test.message ?? "Connection test failed");
+        // Drop the live pool and tunnel so the next getLive() reconnects with the new config instead of reusing the old one.
+        if (entry.live)
+            await entry.live.then((c) => c.close()).catch(() => { });
+        this.closeTunnel(id);
+        entry.config = config;
+        entry.live = undefined;
+        this.saveToDisk();
+        return redact(config);
+    }
+    /**
+     * Tests a config without persisting it or touching any already-open pool
+     * or tunnel — used by the "Test connection" button for a not-yet-saved
+     * config, and for a saved one with unsaved edits applied on top. Always
+     * runs under a throwaway id so a concurrent tunnel for the real
+     * connection (if any) is never reused or torn down by this call.
+     */
+    async testConfig(config) {
+        const probeId = `test-${nanoid()}`;
+        const probeConfig = { ...config, id: probeId };
+        try {
+            const driver = registry.get(probeConfig.driver);
+            return await driver.testConnection(await this.withTunnel(probeConfig));
+        }
+        catch (err) {
+            return { ok: false, message: err.message };
+        }
+        finally {
+            this.closeTunnel(probeId);
+        }
+    }
+    /** Test a brand-new connection before it's ever created. */
+    testNew(input) {
+        return this.testConfig(input);
+    }
+    /** Test a saved connection, optionally with unsaved edits (same merge rule as `update`) layered on top. */
+    testExisting(id, patch = {}) {
+        const entry = this.connections.get(id);
+        if (!entry)
+            throw new Error(`Unknown connection "${id}"`);
+        const config = { ...entry.config };
+        for (const [key, value] of Object.entries(patch)) {
+            if (value !== undefined)
+                config[key] = value;
+        }
+        return this.testConfig(config);
+    }
     list() {
         return [...this.connections.values()].map((c) => redact(c.config));
     }

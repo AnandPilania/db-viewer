@@ -35,6 +35,35 @@ export async function connectionRoutes(app) {
             return sendError(reply, err);
         }
     });
+    app.patch("/api/connections/:id", async (req, reply) => {
+        const { id } = req.params;
+        const body = req.body;
+        try {
+            return await connectionStore.update(id, body);
+        }
+        catch (err) {
+            return sendError(reply, err);
+        }
+    });
+    app.post("/api/connections/test", async (req, reply) => {
+        const body = req.body;
+        try {
+            return await connectionStore.testNew(body);
+        }
+        catch (err) {
+            return sendError(reply, err);
+        }
+    });
+    app.post("/api/connections/:id/test", async (req, reply) => {
+        const { id } = req.params;
+        const body = req.body ?? {};
+        try {
+            return await connectionStore.testExisting(id, body);
+        }
+        catch (err) {
+            return sendError(reply, err);
+        }
+    });
     app.delete("/api/connections/:id", async (req, reply) => {
         const { id } = req.params;
         await connectionStore.remove(id);

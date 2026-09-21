@@ -69,7 +69,7 @@ export function decrypt(payload) {
         // authenticate data" tells the operator nothing about what to do.
         throw new Error("Could not decrypt a stored credential — the encryption key does not match the one used to save it. " +
             "Restore the original DB_VIEWER_SECRET_KEY / .data/secret.key, or delete the affected connection and re-add it. " +
-            `(${err.message})`);
+            `(${err.message})`, { cause: err });
     }
 }
 function decryptUnchecked(payload) {
