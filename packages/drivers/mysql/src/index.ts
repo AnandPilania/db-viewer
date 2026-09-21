@@ -1,6 +1,7 @@
 import mysql from "mysql2/promise";
-import type { Pool, PoolConnection, RowDataPacket, ResultSetHeader } from "mysql2/promise";
+import type { Pool, RowDataPacket, ResultSetHeader } from "mysql2/promise";
 import {
+    compileFilters,
     diffTableSnapshots,
     resolveSsl,
     assertSafeIdentifier,
@@ -34,7 +35,6 @@ const WATCH_ROW_LIMIT = 1000;
 // is_not_null/in are handled separately) — anything else is a request body
 // forged past the frontend's own TS types, since QueryFilter.op is a closed
 // union there but req.body is untyped on arrival at the server.
-const SAFE_COMPARISON_OPS = new Set(["=", "!=", ">", ">=", "<", "<=", "like"]);
 
 /** mysql2's ssl option accepts ca/cert/key directly as PEM strings — no temp files needed. */
 function toMysqlSsl(config: ConnectionConfig): mysql.PoolOptions["ssl"] {
@@ -199,7 +199,6 @@ class MysqlConnection implements DriverConnection {
     async queryRows(options: QueryRowsOptions): Promise<QueryRowsResult> {
         assertSafeIdentifier(options.table, "table");
         for (const c of options.columns ?? []) assertSafeIdentifier(c, "column");
-        for (const f of options.filters ?? []) assertSafeIdentifier(f.column, "column");
         for (const s of options.sort ?? []) assertSafeIdentifier(s.column, "sort column");
 
         const [pkCols, columns] = await Promise.all([
@@ -217,29 +216,27 @@ class MysqlConnection implements DriverConnection {
         const quote = (identifier: string) => `\`${identifier}\``;
 
         const pushKeyset = (values: unknown[], inclusive: boolean) => {
-            where.push(keysetComparison(orderCols, values.length, { descending, inclusive, quote, placeholder: () => "?" }));
+            where.push(
+                keysetComparison(orderCols, values.length, { descending, inclusive, quote, placeholder: () => "?" })
+            );
             params.push(...values);
         };
 
         if (options.afterCursor) pushKeyset(decodeCursor(options.afterCursor), false);
         else if (options.seek?.length) pushKeyset(options.seek.slice(0, orderCols.length), true);
-        for (const f of options.filters ?? []) {
-            if (f.op === "is_null") where.push(`\`${f.column}\` IS NULL`);
-            else if (f.op === "is_not_null") where.push(`\`${f.column}\` IS NOT NULL`);
-            else if (f.op === "in" && Array.isArray(f.value)) {
-                where.push(`\`${f.column}\` IN (${f.value.map(() => "?").join(", ")})`);
-                params.push(...f.value);
-            } else {
-                if (!SAFE_COMPARISON_OPS.has(f.op)) throw new Error(`Invalid filter operator: ${JSON.stringify(f.op)}`);
-                const opSql = f.op === "like" ? "LIKE" : f.op;
-                where.push(`\`${f.column}\` ${opSql} ?`);
-                params.push(f.value);
-            }
-        }
+        const filterSql = compileFilters(options.filters, {
+            quote,
+            bind: (value) => {
+                params.push(value);
+                return "?";
+            },
+        });
+        if (filterSql) where.push(filterSql);
 
         const orderSql = orderBy.map((o) => `${quote(o.column)} ${o.direction === "desc" ? "DESC" : "ASC"}`).join(", ");
-        const sql = `SELECT ${selectCols} FROM \`${options.table}\` ${where.length ? "WHERE " + where.join(" AND ") : ""
-            } ORDER BY ${orderSql} LIMIT ?`;
+        const sql = `SELECT ${selectCols} FROM \`${options.table}\` ${
+            where.length ? "WHERE " + where.join(" AND ") : ""
+        } ORDER BY ${orderSql} LIMIT ?`;
         params.push(options.pageSize + 1);
 
         const [rows] = await this.pool.query<RowDataPacket[]>(sql, params);
@@ -348,14 +345,18 @@ class MysqlConnection implements DriverConnection {
         const sql = cols.length
             ? `INSERT INTO \`${table}\` (${colList}) VALUES (${placeholders})`
             : `INSERT INTO \`${table}\` () VALUES ()`;
-        const [result] = await this.pool.query(sql, cols.map((c) => values[c]));
+        const [result] = await this.pool.query(
+            sql,
+            cols.map((c) => values[c])
+        );
         const insertId = (result as ResultSetHeader).insertId;
         const pkCols = await this.primaryKeyColumns(table);
 
         if (insertId && pkCols.length === 1) {
-            const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT * FROM \`${table}\` WHERE \`${pkCols[0]}\` = ?`, [
-                insertId,
-            ]);
+            const [rows] = await this.pool.query<RowDataPacket[]>(
+                `SELECT * FROM \`${table}\` WHERE \`${pkCols[0]}\` = ?`,
+                [insertId]
+            );
             if (rows[0]) return rows[0];
         }
         return { ...values, ...(insertId ? { [pkCols[0] ?? "id"]: insertId } : {}) };
@@ -384,7 +385,10 @@ class MysqlConnection implements DriverConnection {
         if (pkCols.length === 0) throw new Error("deleteRow requires at least one primary key column");
         for (const c of pkCols) assertSafeIdentifier(c, "column");
         const whereClause = pkCols.map((c) => `\`${c}\` = ?`).join(" AND ");
-        await this.pool.query(`DELETE FROM \`${table}\` WHERE ${whereClause}`, pkCols.map((c) => primaryKey[c]));
+        await this.pool.query(
+            `DELETE FROM \`${table}\` WHERE ${whereClause}`,
+            pkCols.map((c) => primaryKey[c])
+        );
     }
 
     watchTable(table: string, _schema: string | undefined, onChange: (event: RowChangeEvent) => void): () => void {
@@ -394,7 +398,9 @@ class MysqlConnection implements DriverConnection {
 
         const poll = async () => {
             const pkCols = await this.primaryKeyColumns(table);
-            const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT * FROM \`${table}\` LIMIT ${WATCH_ROW_LIMIT}`);
+            const [rows] = await this.pool.query<RowDataPacket[]>(
+                `SELECT * FROM \`${table}\` LIMIT ${WATCH_ROW_LIMIT}`
+            );
             if (stopped) return;
             if (lastRows) {
                 for (const event of diffTableSnapshots(lastRows, rows, pkCols)) onChange(event);
@@ -402,7 +408,8 @@ class MysqlConnection implements DriverConnection {
             lastRows = rows; // first poll only establishes the baseline — nothing to diff against yet
         };
 
-        const onPollError = (err: unknown) => console.error(`MySQL table-watch poll failed for "${table}":`, (err as Error).message);
+        const onPollError = (err: unknown) =>
+            console.error(`MySQL table-watch poll failed for "${table}":`, (err as Error).message);
         void poll().catch(onPollError);
         this.watchIntervals.set(
             table,

@@ -155,6 +155,62 @@ class ConnectionStore {
         return redact(config);
     }
 
+    /** Only patch keys that are actually present are applied — `undefined` means "leave as-is", so a client can omit a secret it isn't changing without wiping it. */
+    async update(id: string, patch: Partial<Omit<ConnectionConfig, "id">>): Promise<ConnectionConfig> {
+        const entry = this.connections.get(id);
+        if (!entry) throw new Error(`Unknown connection "${id}"`);
+        const config: ConnectionConfig = { ...entry.config };
+        for (const [key, value] of Object.entries(patch)) {
+            if (value !== undefined) (config as any)[key] = value;
+        }
+        const driver = registry.get(config.driver);
+        const test = await driver.testConnection(await this.withTunnel(config));
+        if (!test.ok) throw new Error(test.message ?? "Connection test failed");
+        // Drop the live pool and tunnel so the next getLive() reconnects with the new config instead of reusing the old one.
+        if (entry.live) await entry.live.then((c) => c.close()).catch(() => { });
+        this.closeTunnel(id);
+        entry.config = config;
+        entry.live = undefined;
+        this.saveToDisk();
+        return redact(config);
+    }
+
+    /**
+     * Tests a config without persisting it or touching any already-open pool
+     * or tunnel — used by the "Test connection" button for a not-yet-saved
+     * config, and for a saved one with unsaved edits applied on top. Always
+     * runs under a throwaway id so a concurrent tunnel for the real
+     * connection (if any) is never reused or torn down by this call.
+     */
+    private async testConfig(config: Omit<ConnectionConfig, "id">): Promise<{ ok: boolean; message?: string }> {
+        const probeId = `test-${nanoid()}`;
+        const probeConfig: ConnectionConfig = { ...config, id: probeId };
+        try {
+            const driver = registry.get(probeConfig.driver);
+            return await driver.testConnection(await this.withTunnel(probeConfig));
+        } catch (err) {
+            return { ok: false, message: (err as Error).message };
+        } finally {
+            this.closeTunnel(probeId);
+        }
+    }
+
+    /** Test a brand-new connection before it's ever created. */
+    testNew(input: Omit<ConnectionConfig, "id">): Promise<{ ok: boolean; message?: string }> {
+        return this.testConfig(input);
+    }
+
+    /** Test a saved connection, optionally with unsaved edits (same merge rule as `update`) layered on top. */
+    testExisting(id: string, patch: Partial<Omit<ConnectionConfig, "id">> = {}): Promise<{ ok: boolean; message?: string }> {
+        const entry = this.connections.get(id);
+        if (!entry) throw new Error(`Unknown connection "${id}"`);
+        const config: ConnectionConfig = { ...entry.config };
+        for (const [key, value] of Object.entries(patch)) {
+            if (value !== undefined) (config as any)[key] = value;
+        }
+        return this.testConfig(config);
+    }
+
     list(): ConnectionConfig[] {
         return [...this.connections.values()].map((c) => redact(c.config));
     }

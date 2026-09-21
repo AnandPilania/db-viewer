@@ -51,7 +51,13 @@ const PACKAGES = [
 ];
 
 function sh(cmd, args, opts = {}) {
-    return execFileSync(cmd, args, { cwd: root, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], ...winShellOpts(cmd), ...opts });
+    return execFileSync(cmd, args, {
+        cwd: root,
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+        ...winShellOpts(cmd),
+        ...opts,
+    });
 }
 
 /** Runs cmd, returns { ok, reason } — reason is set (and ok is false) whether the command
@@ -112,7 +118,7 @@ async function confirm(question) {
     return /^y(es)?$/i.test(answer.trim());
 }
 
-class UsageError extends Error { }
+class UsageError extends Error {}
 
 function bumpVersion(current, kind) {
     if (/^\d+\.\d+\.\d+$/.test(kind)) return kind; // exact version passed directly
@@ -156,7 +162,9 @@ function preflight({ dryRun }) {
         }
     } catch {
         gitAvailable = false;
-        problems.push("Not inside a git repository (or git isn't installed) — release from a real clone, not an extracted archive.");
+        problems.push(
+            "Not inside a git repository (or git isn't installed) — release from a real clone, not an extracted archive."
+        );
     }
 
     if (gitAvailable) {
@@ -169,7 +177,9 @@ function preflight({ dryRun }) {
     if (!dryRun) {
         const { user, reason } = currentNpmUser();
         if (!user) {
-            problems.push(`Not logged into npm, or npm couldn't be run — ${reason}. Run "npm login" and verify "npm whoami" works in this same terminal.`);
+            problems.push(
+                `Not logged into npm, or npm couldn't be run — ${reason}. Run "npm login" and verify "npm whoami" works in this same terminal.`
+            );
         } else {
             console.log(`npm user: ${user}`);
         }
@@ -183,7 +193,7 @@ function preflight({ dryRun }) {
     if (!pnpmCheck.ok) {
         problems.push(
             `pnpm isn't runnable — ${pnpmCheck.reason}. This script publishes via "pnpm publish" ` +
-            `so workspace:* ranges get rewritten correctly; verify "pnpm --version" works in this same terminal.`
+                `so workspace:* ranges get rewritten correctly; verify "pnpm --version" works in this same terminal.`
         );
     }
 
@@ -278,8 +288,8 @@ async function main() {
         if (result.status !== 0) {
             console.error(
                 `\nPublish failed for ${p.name}. Packages published before this one are already live —\n` +
-                `fix the problem and re-run with --resume to pick up where this left off (already-\n` +
-                `published packages at this version will be skipped automatically).`
+                    `fix the problem and re-run with --resume to pick up where this left off (already-\n` +
+                    `published packages at this version will be skipped automatically).`
             );
             process.exit(1);
         }
@@ -292,7 +302,10 @@ async function main() {
     // step needs to be done by hand.
     const addResult = spawnSync("git", ["add", "-A"], { cwd: root, stdio: "inherit" });
     if (addResult.status === 0) {
-        const commitResult = spawnSync("git", ["commit", "-m", `release: v${targetVersion}`], { cwd: root, stdio: "inherit" });
+        const commitResult = spawnSync("git", ["commit", "-m", `release: v${targetVersion}`], {
+            cwd: root,
+            stdio: "inherit",
+        });
         if (commitResult.status === 0) {
             spawnSync("git", ["tag", `v${targetVersion}`], { cwd: root, stdio: "inherit" });
             console.log(`\nCommitted and tagged v${targetVersion}. Don't forget: git push && git push --tags`);

@@ -42,6 +42,35 @@ export async function connectionRoutes(app: FastifyInstance) {
         }
     });
 
+    app.patch("/api/connections/:id", async (req, reply) => {
+        const { id } = req.params as { id: string };
+        const body = req.body as any;
+        try {
+            return await connectionStore.update(id, body);
+        } catch (err) {
+            return sendError(reply, err);
+        }
+    });
+
+    app.post("/api/connections/test", async (req, reply) => {
+        const body = req.body as any;
+        try {
+            return await connectionStore.testNew(body);
+        } catch (err) {
+            return sendError(reply, err);
+        }
+    });
+
+    app.post("/api/connections/:id/test", async (req, reply) => {
+        const { id } = req.params as { id: string };
+        const body = (req.body as any) ?? {};
+        try {
+            return await connectionStore.testExisting(id, body);
+        } catch (err) {
+            return sendError(reply, err);
+        }
+    });
+
     app.delete("/api/connections/:id", async (req, reply) => {
         const { id } = req.params as { id: string };
         await connectionStore.remove(id);

@@ -78,7 +78,8 @@ export function decrypt(payload: string): string {
     throw new Error(
       "Could not decrypt a stored credential — the encryption key does not match the one used to save it. " +
         "Restore the original DB_VIEWER_SECRET_KEY / .data/secret.key, or delete the affected connection and re-add it. " +
-        `(${(err as Error).message})`
+        `(${(err as Error).message})`,
+      { cause: err }
     );
   }
 }

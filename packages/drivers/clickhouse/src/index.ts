@@ -1,4 +1,5 @@
 import {
+    compileFilters,
     diffTableSnapshots,
     assertSafeIdentifier,
     keysetComparison,
@@ -33,7 +34,6 @@ const WATCH_ROW_LIMIT = 1000;
 // is_not_null/in/like are handled separately) — anything else is a request
 // body forged past the frontend's own TS types, since QueryFilter.op is a
 // closed union there but req.body is untyped on arrival at the server.
-const SAFE_COMPARISON_OPS = new Set(["=", "!=", ">", ">=", "<", "<="]);
 
 /**
  * ClickHouse has no official lightweight HTTP-only client that also
@@ -172,7 +172,7 @@ class ClickHouseConnection implements DriverConnection {
         return this.metadata.get(`schema-cols:${database}`, async () => {
             const result = await this.httpQuery(
                 `SELECT table, name, type, is_in_primary_key FROM system.columns ` +
-                `WHERE database = ${toLiteral(database)} ORDER BY table, position FORMAT JSON`
+                    `WHERE database = ${toLiteral(database)} ORDER BY table, position FORMAT JSON`
             );
             const byTable = new Map<string, ColumnDefinition[]>();
             for (const r of result.data) {
@@ -206,7 +206,7 @@ class ClickHouseConnection implements DriverConnection {
     private async describeColumnsUncached(database: string, table: string): Promise<ColumnDefinition[]> {
         const result = await this.httpQuery(
             `SELECT name, type, is_in_primary_key FROM system.columns ` +
-            `WHERE database = ${toLiteral(database)} AND table = ${toLiteral(table)} FORMAT JSON`
+                `WHERE database = ${toLiteral(database)} AND table = ${toLiteral(table)} FORMAT JSON`
         );
         return result.data.map((r) => {
             const { type, nullable } = mapClickHouseType(String(r.type));
@@ -231,7 +231,7 @@ class ClickHouseConnection implements DriverConnection {
     private async primaryKeyColumns(database: string, table: string): Promise<string[]> {
         const columns = await this.describeColumns(database, table);
         const pks = columns.filter((c) => c.isPrimaryKey).map((c) => c.name);
-        return pks.length ? pks : [columns[0]?.name].filter(Boolean) as string[];
+        return pks.length ? pks : ([columns[0]?.name].filter(Boolean) as string[]);
     }
 
     async queryRows(options: QueryRowsOptions): Promise<QueryRowsResult> {
@@ -239,7 +239,6 @@ class ClickHouseConnection implements DriverConnection {
         assertSafeIdentifier(database, "schema");
         assertSafeIdentifier(options.table, "table");
         for (const c of options.columns ?? []) assertSafeIdentifier(c, "column");
-        for (const f of options.filters ?? []) assertSafeIdentifier(f.column, "column");
         for (const s of options.sort ?? []) assertSafeIdentifier(s.column, "sort column");
 
         const [pkCols, columns] = await Promise.all([
@@ -282,17 +281,14 @@ class ClickHouseConnection implements DriverConnection {
         if (options.afterCursor) pushKeyset(decodeCursor(options.afterCursor), false);
         else if (options.seek?.length) pushKeyset(options.seek.slice(0, orderCols.length), true);
 
-        for (const f of options.filters ?? []) {
-            if (f.op === "is_null") where.push(`\`${f.column}\` IS NULL`);
-            else if (f.op === "is_not_null") where.push(`\`${f.column}\` IS NOT NULL`);
-            else if (f.op === "like") where.push(`\`${f.column}\` LIKE ${toLiteral(f.value)}`);
-            else if (f.op === "in" && Array.isArray(f.value)) {
-                where.push(`\`${f.column}\` IN (${f.value.map((v) => toLiteral(v)).join(", ")})`);
-            } else {
-                if (!SAFE_COMPARISON_OPS.has(f.op)) throw new Error(`Invalid filter operator: ${JSON.stringify(f.op)}`);
-                where.push(`\`${f.column}\` ${f.op} ${toLiteral(f.value)}`);
-            }
-        }
+        // No binder on the HTTP interface, so values become escaped literals
+        // the same way every other ClickHouse query here builds them.
+        const filterSql = compileFilters(options.filters, {
+            quote,
+            bind: (value) => toLiteral(value),
+            likeEscape: false,
+        });
+        if (filterSql) where.push(filterSql);
 
         const orderSql = orderBy.map((o) => `${quote(o.column)} ${o.direction === "desc" ? "DESC" : "ASC"}`).join(", ");
         const sql =
@@ -379,7 +375,14 @@ class ClickHouseConnection implements DriverConnection {
             return {
                 columns: result.meta.map((m) => {
                     const { type, nullable } = mapClickHouseType(m.type);
-                    return { name: m.name, type, nativeType: m.type, nullable, isPrimaryKey: false, isForeignKey: false };
+                    return {
+                        name: m.name,
+                        type,
+                        nativeType: m.type,
+                        nullable,
+                        isPrimaryKey: false,
+                        isForeignKey: false,
+                    };
                 }),
                 affectedRows: result.rows,
                 durationMs: performance.now() - start,
@@ -433,7 +436,9 @@ class ClickHouseConnection implements DriverConnection {
         for (const c of pkCols) assertSafeIdentifier(c, "column");
         const whereClause = pkCols.map((c) => `\`${c}\` = ${toLiteral(primaryKey[c])}`).join(" AND ");
         // ALTER ... UPDATE is an async ClickHouse "mutation" — see class doc comment.
-        await this.httpExecute(`ALTER TABLE \`${database}\`.\`${table}\` UPDATE \`${column}\` = ${toLiteral(value)} WHERE ${whereClause}`);
+        await this.httpExecute(
+            `ALTER TABLE \`${database}\`.\`${table}\` UPDATE \`${column}\` = ${toLiteral(value)} WHERE ${whereClause}`
+        );
     }
 
     watchTable(table: string, schema: string | undefined, onChange: (event: RowChangeEvent) => void): () => void {
@@ -455,7 +460,8 @@ class ClickHouseConnection implements DriverConnection {
             lastRows = result.data; // first poll only establishes the baseline — nothing to diff against yet
         };
 
-        const onPollError = (err: unknown) => console.error(`ClickHouse table-watch poll failed for "${table}":`, (err as Error).message);
+        const onPollError = (err: unknown) =>
+            console.error(`ClickHouse table-watch poll failed for "${table}":`, (err as Error).message);
         void poll().catch(onPollError);
         this.watchIntervals.set(
             table,

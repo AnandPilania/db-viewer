@@ -17,57 +17,57 @@ import type { RowChangeEvent } from "@/hooks/useTableRealtime";
  * quietly wrong one.
  */
 export function applyRowChange(
-  rows: Record<string, unknown>[],
-  event: RowChangeEvent,
-  pkColumns: string[]
+    rows: Record<string, unknown>[],
+    event: RowChangeEvent,
+    pkColumns: string[]
 ): Record<string, unknown>[] {
-  // Without a known primary key there is no safe way to identify the affected
-  // row, and guessing would corrupt the view. Refetching is the caller's job.
-  if (pkColumns.length === 0) return rows;
+    // Without a known primary key there is no safe way to identify the affected
+    // row, and guessing would corrupt the view. Refetching is the caller's job.
+    if (pkColumns.length === 0) return rows;
 
-  // Compared as strings: a bigint arrives as a string over JSON while the
-  // loaded row may hold a number, and a Date/ObjectId round-trips as a string
-  // too. Lenient here beats a live grid that silently stops matching.
-  const matches = (row: Record<string, unknown>, pk: Record<string, unknown>) =>
-    pkColumns.every((c) => c in pk && String(row[c]) === String(pk[c]));
+    // Compared as strings: a bigint arrives as a string over JSON while the
+    // loaded row may hold a number, and a Date/ObjectId round-trips as a string
+    // too. Lenient here beats a live grid that silently stops matching.
+    const matches = (row: Record<string, unknown>, pk: Record<string, unknown>) =>
+        pkColumns.every((c) => c in pk && String(row[c]) === String(pk[c]));
 
-  if (event.type === "insert" && event.row) {
-    if (rows.some((r) => matches(r, event.row!))) return rows;
-    return [event.row, ...rows];
-  }
-
-  if (event.type === "update" && event.primaryKey) {
-    const target = event.primaryKey;
-    // MongoDB's change-stream path sends whole-document replacements
-    // (column "__row__") rather than a single field patch.
-    if (event.column === "__row__" && event.value && typeof event.value === "object") {
-      const replacement = event.value as Record<string, unknown>;
-      let hit = false;
-      const next = rows.map((r) => {
-        if (!matches(r, target)) return r;
-        hit = true;
-        return replacement;
-      });
-      return hit ? next : rows;
+    if (event.type === "insert" && event.row) {
+        if (rows.some((r) => matches(r, event.row!))) return rows;
+        return [event.row, ...rows];
     }
-    if (event.column) {
-      const column = event.column;
-      let hit = false;
-      const next = rows.map((r) => {
-        if (!matches(r, target) || r[column] === event.value) return r;
-        hit = true;
-        return { ...r, [column]: event.value };
-      });
-      return hit ? next : rows;
+
+    if (event.type === "update" && event.primaryKey) {
+        const target = event.primaryKey;
+        // MongoDB's change-stream path sends whole-document replacements
+        // (column "__row__") rather than a single field patch.
+        if (event.column === "__row__" && event.value && typeof event.value === "object") {
+            const replacement = event.value as Record<string, unknown>;
+            let hit = false;
+            const next = rows.map((r) => {
+                if (!matches(r, target)) return r;
+                hit = true;
+                return replacement;
+            });
+            return hit ? next : rows;
+        }
+        if (event.column) {
+            const column = event.column;
+            let hit = false;
+            const next = rows.map((r) => {
+                if (!matches(r, target) || r[column] === event.value) return r;
+                hit = true;
+                return { ...r, [column]: event.value };
+            });
+            return hit ? next : rows;
+        }
+        return rows;
     }
+
+    if (event.type === "delete" && event.primaryKey) {
+        const target = event.primaryKey;
+        const next = rows.filter((r) => !matches(r, target));
+        return next.length === rows.length ? rows : next;
+    }
+
     return rows;
-  }
-
-  if (event.type === "delete" && event.primaryKey) {
-    const target = event.primaryKey;
-    const next = rows.filter((r) => !matches(r, target));
-    return next.length === rows.length ? rows : next;
-  }
-
-  return rows;
 }

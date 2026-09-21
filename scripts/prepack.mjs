@@ -17,17 +17,20 @@ const webDist = path.join(root, "apps", "web", "dist");
 const outServer = path.join(root, "server");
 const outPublic = path.join(root, "public");
 
-for (const [src, label] of [[serverDist, "apps/server/dist"], [webDist, "apps/web/dist"]]) {
-  if (!existsSync(path.join(src, src === serverDist ? "index.js" : "index.html"))) {
-    console.error(
-      `Missing build output: ${label}\nRun "pnpm build" first (this should happen automatically via the "prepublishOnly" script).`
-    );
-    process.exit(1);
-  }
+for (const [src, label] of [
+    [serverDist, "apps/server/dist"],
+    [webDist, "apps/web/dist"],
+]) {
+    if (!existsSync(path.join(src, src === serverDist ? "index.js" : "index.html"))) {
+        console.error(
+            `Missing build output: ${label}\nRun "pnpm build" first (this should happen automatically via the "prepublishOnly" script).`
+        );
+        process.exit(1);
+    }
 }
 
 for (const dir of [outServer, outPublic]) {
-  if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
 }
 
 cpSync(serverDist, outServer, { recursive: true });

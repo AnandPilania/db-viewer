@@ -115,10 +115,10 @@ function driverList() {
 function printDriverHelp() {
     console.log(
         "Usage:\n" +
-        "  db-viewer driver list               Show installed & available drivers\n" +
-        "  db-viewer driver add <name>         Install a driver (e.g. postgres, sqlite)\n" +
-        "  db-viewer driver remove <name>      Uninstall a driver\n\n" +
-        `Known drivers: ${Object.keys(KNOWN_DRIVERS).join(", ")}\n`
+            "  db-viewer driver list               Show installed & available drivers\n" +
+            "  db-viewer driver add <name>         Install a driver (e.g. postgres, sqlite)\n" +
+            "  db-viewer driver remove <name>      Uninstall a driver\n\n" +
+            `Known drivers: ${Object.keys(KNOWN_DRIVERS).join(", ")}\n`
     );
 }
 

@@ -1,5 +1,6 @@
 import { MongoClient, ObjectId } from "mongodb";
 import type { Collection, Db, Document, Sort } from "mongodb";
+import { compileFilterMatch } from "@pilaniaanand/driver-interface";
 import type {
     ColumnDefinition,
     ColumnType,
@@ -118,21 +119,14 @@ class MongoConnection implements DriverConnection {
 
     async queryRows(options: QueryRowsOptions): Promise<QueryRowsResult> {
         const coll = this.db.collection(options.table);
-        const filter: Document = {};
-
-        if (options.afterCursor) {
-            filter._id = { $gt: decodeCursor(options.afterCursor) };
-        }
-        for (const f of options.filters ?? []) {
-            if (f.op === "is_null") filter[f.column] = null;
-            else if (f.op === "is_not_null") filter[f.column] = { $ne: null };
-            else if (f.op === "like") filter[f.column] = { $regex: String(f.value ?? ""), $options: "i" };
-            else if (f.op === "in") filter[f.column] = { $in: (f.value as unknown[]) ?? [] };
-            else {
-                const mongoOp = { "=": "$eq", "!=": "$ne", ">": "$gt", ">=": "$gte", "<": "$lt", "<=": "$lte" }[f.op];
-                filter[f.column] = mongoOp ? { [mongoOp]: f.value } : f.value;
-            }
-        }
+        const cursor: Document | null = options.afterCursor
+            ? { _id: { $gt: decodeCursor(options.afterCursor) } }
+            : null;
+        const match = compileFilterMatch(options.filters);
+        // $and rather than merging keys: a user filter on _id would otherwise
+        // overwrite the keyset cursor and silently restart paging from the top.
+        const filter: Document =
+            cursor && Object.keys(match).length ? { $and: [cursor, match] } : { ...cursor, ...match };
 
         const sort: Sort = options.sort?.length
             ? Object.fromEntries(options.sort.map((s) => [s.column, s.direction === "asc" ? 1 : -1]))
@@ -272,7 +266,7 @@ class MongoConnection implements DriverConnection {
             stream = this.db.collection(table).watch([], { fullDocument: "updateLookup" });
         } catch (err) {
             console.error(`MongoDB change stream unavailable for "${table}":`, (err as Error).message);
-            return () => { };
+            return () => {};
         }
 
         stream.on("change", (change: any) => {
@@ -293,7 +287,7 @@ class MongoConnection implements DriverConnection {
         stream.on("error", (err: Error) => console.error(`MongoDB change stream error on "${table}":`, err.message));
 
         return () => {
-            stream.close().catch(() => { });
+            stream.close().catch(() => {});
         };
     }
 
@@ -305,7 +299,9 @@ class MongoConnection implements DriverConnection {
 function buildConnectionString(config: ConnectionConfig): string {
     const uri = config.extra?.uri as string | undefined;
     if (uri) return uri;
-    const auth = config.username ? `${encodeURIComponent(config.username)}:${encodeURIComponent(config.password ?? "")}@` : "";
+    const auth = config.username
+        ? `${encodeURIComponent(config.username)}:${encodeURIComponent(config.password ?? "")}@`
+        : "";
     const host = config.host ?? "localhost";
     const port = config.port ?? 27017;
     return `mongodb://${auth}${host}:${port}`;

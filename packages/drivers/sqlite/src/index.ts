@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import {
+    compileFilters,
     diffTableSnapshots,
     assertSafeIdentifier,
     keysetComparison,
@@ -33,7 +34,6 @@ const WATCH_ROW_LIMIT = 1000;
 // is_not_null/in/like are handled separately) — anything else is a request
 // body forged past the frontend's own TS types, since QueryFilter.op is a
 // closed union there but req.body is untyped on arrival at the server.
-const SAFE_COMPARISON_OPS = new Set(["=", "!=", ">", ">=", "<", "<="]);
 
 function mapSqliteType(declared: string): ColumnType {
     const t = declared.toUpperCase();
@@ -82,8 +82,7 @@ class SqliteConnection implements DriverConnection {
             let estimatedRowCount: number | undefined;
             try {
                 const stat = this.db.prepare(`SELECT MAX(rowid) as maxRowid FROM "${r.name}"`).get() as
-                    | { maxRowid: number | null }
-                    | undefined;
+                    { maxRowid: number | null } | undefined;
                 estimatedRowCount = stat?.maxRowid ?? undefined;
             } catch {
                 estimatedRowCount = undefined;
@@ -143,7 +142,6 @@ class SqliteConnection implements DriverConnection {
         const { table, pageSize, afterCursor, filters, sort } = options;
         assertSafeIdentifier(table, "table");
         for (const c of options.columns ?? []) assertSafeIdentifier(c, "column");
-        for (const f of filters ?? []) assertSafeIdentifier(f.column, "column");
         for (const s of sort ?? []) assertSafeIdentifier(s.column, "column");
 
         const pk = this.primaryKeyColumn(table);
@@ -163,32 +161,28 @@ class SqliteConnection implements DriverConnection {
         const quote = (identifier: string) => `"${identifier}"`;
 
         const pushKeyset = (values: unknown[], inclusive: boolean) => {
-            where.push(keysetComparison(orderCols, values.length, { descending, inclusive, quote, placeholder: () => "?" }));
+            where.push(
+                keysetComparison(orderCols, values.length, { descending, inclusive, quote, placeholder: () => "?" })
+            );
             params.push(...values);
         };
 
         if (afterCursor) pushKeyset(decodeCursor(afterCursor), false);
         else if (options.seek?.length) pushKeyset(options.seek.slice(0, orderCols.length), true);
 
-        for (const f of filters ?? []) {
-            if (f.op === "is_null") where.push(`"${f.column}" IS NULL`);
-            else if (f.op === "is_not_null") where.push(`"${f.column}" IS NOT NULL`);
-            else if (f.op === "like") {
-                where.push(`"${f.column}" LIKE ?`);
-                params.push(f.value);
-            } else if (f.op === "in" && Array.isArray(f.value)) {
-                where.push(`"${f.column}" IN (${f.value.map(() => "?").join(",")})`);
-                params.push(...f.value);
-            } else {
-                if (!SAFE_COMPARISON_OPS.has(f.op)) throw new Error(`Invalid filter operator: ${JSON.stringify(f.op)}`);
-                where.push(`"${f.column}" ${f.op} ?`);
-                params.push(f.value);
-            }
-        }
+        const filterSql = compileFilters(filters, {
+            quote,
+            bind: (value) => {
+                params.push(value);
+                return "?";
+            },
+        });
+        if (filterSql) where.push(filterSql);
 
         const orderSql = orderBy.map((o) => `${quote(o.column)} ${o.direction === "desc" ? "DESC" : "ASC"}`).join(", ");
-        const sql = `SELECT ${selectCols} FROM "${table}" ${where.length ? "WHERE " + where.join(" AND ") : ""
-            } ORDER BY ${orderSql} LIMIT ?`;
+        const sql = `SELECT ${selectCols} FROM "${table}" ${
+            where.length ? "WHERE " + where.join(" AND ") : ""
+        } ORDER BY ${orderSql} LIMIT ?`;
         params.push(pageSize + 1); // fetch one extra to know if there's a next page
 
         const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
@@ -253,7 +247,11 @@ class SqliteConnection implements DriverConnection {
         return { columns: [], affectedRows: info.changes, durationMs: performance.now() - start };
     }
 
-    async insertRow(table: string, _schema: string | undefined, values: Record<string, unknown>): Promise<Record<string, unknown>> {
+    async insertRow(
+        table: string,
+        _schema: string | undefined,
+        values: Record<string, unknown>
+    ): Promise<Record<string, unknown>> {
         assertSafeIdentifier(table, "table");
         const cols = Object.keys(values);
         for (const c of cols) assertSafeIdentifier(c, "column");
@@ -263,8 +261,7 @@ class SqliteConnection implements DriverConnection {
         const info = this.db.prepare(sql).run(...cols.map((c) => values[c]));
         const pk = this.primaryKeyColumn(table);
         const inserted = this.db.prepare(`SELECT * FROM "${table}" WHERE rowid = ?`).get(info.lastInsertRowid) as
-            | Record<string, unknown>
-            | undefined;
+            Record<string, unknown> | undefined;
         return inserted ?? { ...values, [pk]: info.lastInsertRowid };
     }
 
@@ -297,7 +294,8 @@ class SqliteConnection implements DriverConnection {
     watchTable(table: string, _schema: string | undefined, onChange: (event: RowChangeEvent) => void): () => void {
         assertSafeIdentifier(table, "table");
         const pkCols = [this.primaryKeyColumn(table)];
-        const readSnapshot = () => this.db.prepare(`SELECT * FROM "${table}" LIMIT ${WATCH_ROW_LIMIT}`).all() as Record<string, unknown>[];
+        const readSnapshot = () =>
+            this.db.prepare(`SELECT * FROM "${table}" LIMIT ${WATCH_ROW_LIMIT}`).all() as Record<string, unknown>[];
         const readDataVersion = () =>
             (this.db.pragma("data_version", { simple: false }) as { data_version: number }[])[0].data_version;
 
@@ -341,7 +339,10 @@ export const sqliteDriver: DatabaseDriver = {
 
     async testConnection(config: ConnectionConfig) {
         try {
-            const db = new Database(config.filePath ?? ":memory:", { readonly: true, fileMustExist: !!config.filePath });
+            const db = new Database(config.filePath ?? ":memory:", {
+                readonly: true,
+                fileMustExist: !!config.filePath,
+            });
             db.close();
             return { ok: true };
         } catch (err) {

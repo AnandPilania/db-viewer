@@ -2,10 +2,9 @@ import type {
     ConnectionConfig,
     ExecSpec,
     QueryExecResult,
-    QueryFilter,
+    FilterNode,
     QueryLanguage,
     QueryRowsResult,
-    QuerySpec,
     RowCountEstimate,
     RowCountExact,
     SchemaSummary,
@@ -40,7 +39,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export interface DriverInfo {
     key: string;
     displayName: string;
-    capabilities: { transactions: boolean; schemas: boolean; streaming: boolean; cancellation: boolean; queryLanguage: QueryLanguage };
+    capabilities: {
+        transactions: boolean;
+        schemas: boolean;
+        streaming: boolean;
+        cancellation: boolean;
+        queryLanguage: QueryLanguage;
+    };
 }
 
 export interface UninstalledDriverInfo {
@@ -62,7 +67,22 @@ export const api = {
     createConnection: (input: Omit<ConnectionConfig, "id">) =>
         request<ConnectionConfig>("/connections", { method: "POST", body: JSON.stringify(input) }),
 
+    updateConnection: (id: string, patch: Partial<Omit<ConnectionConfig, "id">>) =>
+        request<ConnectionConfig>(`/connections/${seg(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
+
     deleteConnection: (id: string) => request<void>(`/connections/${seg(id)}`, { method: "DELETE" }),
+
+    testNewConnection: (input: Omit<ConnectionConfig, "id">) =>
+        request<{ ok: boolean; message?: string }>("/connections/test", {
+            method: "POST",
+            body: JSON.stringify(input),
+        }),
+
+    testExistingConnection: (id: string, patch: Partial<Omit<ConnectionConfig, "id">> = {}) =>
+        request<{ ok: boolean; message?: string }>(`/connections/${seg(id)}/test`, {
+            method: "POST",
+            body: JSON.stringify(patch),
+        }),
 
     listSchemas: (id: string) => request<SchemaSummary[]>(`/connections/${seg(id)}/schemas`),
 
@@ -70,7 +90,9 @@ export const api = {
         request<TableDefinition[]>(`/connections/${seg(id)}/tables${schema ? `?schema=${seg(schema)}` : ""}`),
 
     describeTable: (id: string, table: string, schema?: string) =>
-        request<TableDefinition>(`/connections/${seg(id)}/tables/${seg(table)}${schema ? `?schema=${seg(schema)}` : ""}`),
+        request<TableDefinition>(
+            `/connections/${seg(id)}/tables/${seg(table)}${schema ? `?schema=${seg(schema)}` : ""}`
+        ),
 
     queryRows: (
         id: string,
@@ -81,7 +103,7 @@ export const api = {
             afterCursor?: string | null;
             /** Sort-key values to jump to (inclusive), as an alternative to a cursor. */
             seek?: unknown[] | null;
-            filters?: QueryFilter[];
+            filters?: FilterNode[];
             sort?: { column: string; direction: "asc" | "desc" }[];
             signal?: AbortSignal;
         }
@@ -95,13 +117,20 @@ export const api = {
     },
 
     estimateCount: (id: string, table: string, schema?: string) =>
-        request<RowCountEstimate>(`/connections/${seg(id)}/tables/${seg(table)}/count/estimate${schema ? `?schema=${seg(schema)}` : ""}`),
+        request<RowCountEstimate>(
+            `/connections/${seg(id)}/tables/${seg(table)}/count/estimate${schema ? `?schema=${seg(schema)}` : ""}`
+        ),
 
     countExact: (id: string, table: string, schema?: string) =>
-        request<RowCountExact>(`/connections/${seg(id)}/tables/${seg(table)}/count/exact${schema ? `?schema=${seg(schema)}` : ""}`),
+        request<RowCountExact>(
+            `/connections/${seg(id)}/tables/${seg(table)}/count/exact${schema ? `?schema=${seg(schema)}` : ""}`
+        ),
 
     execute: (id: string, query: ExecSpec) =>
-        request<QueryExecResult>(`/connections/${seg(id)}/execute`, { method: "POST", body: JSON.stringify({ query }) }),
+        request<QueryExecResult>(`/connections/${seg(id)}/execute`, {
+            method: "POST",
+            body: JSON.stringify({ query }),
+        }),
 
     updateCell: (
         id: string,
@@ -205,7 +234,8 @@ export const dashboardApi = {
     widgetData: (id: string) => request<WidgetData>(`/widgets/${seg(id)}/data`),
 
     listDashboards: () => request<Dashboard[]>("/dashboards"),
-    createDashboard: (title: string) => request<Dashboard>("/dashboards", { method: "POST", body: JSON.stringify({ title }) }),
+    createDashboard: (title: string) =>
+        request<Dashboard>("/dashboards", { method: "POST", body: JSON.stringify({ title }) }),
     getDashboard: (id: string) => request<Dashboard>(`/dashboards/${seg(id)}`),
     updateDashboard: (id: string, patch: { title?: string; layout?: DashboardLayoutItem[] }) =>
         request<Dashboard>(`/dashboards/${seg(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),

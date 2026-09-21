@@ -9,7 +9,7 @@ export function reportClientError(message: string, extra?: { stack?: string; com
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message, url: window.location.href, ...extra }),
-    }).catch(() => { });
+    }).catch(() => {});
 }
 
 let installed = false;

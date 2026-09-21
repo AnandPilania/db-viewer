@@ -1,0 +1,9 @@
+<!-- Placeholder mark — swap this file to rebrand; the README references it by path. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="db-viewer logo">
+  <rect width="128" height="128" rx="26" fill="#0b0f14"/>
+  <g fill="none" stroke="#38bdf8" stroke-width="7" stroke-linecap="round">
+    <ellipse cx="64" cy="40" rx="30" ry="12"/>
+    <path d="M34 40v24c0 6.6 13.4 12 30 12s30-5.4 30-12V40"/>
+    <path d="M34 64v24c0 6.6 13.4 12 30 12s30-5.4 30-12V64"/>
+  </g>
+</svg>

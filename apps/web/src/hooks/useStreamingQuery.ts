@@ -74,7 +74,13 @@ export function useStreamingQuery(connectionId: string | null) {
 
             ws.onmessage = (event) => {
                 if (wsRef.current !== ws) return; // superseded by a newer run
-                let msg: { type: string; rows?: Record<string, unknown>[]; columns?: ColumnDefinition[]; message?: string; durationMs?: number };
+                let msg: {
+                    type: string;
+                    rows?: Record<string, unknown>[];
+                    columns?: ColumnDefinition[];
+                    message?: string;
+                    durationMs?: number;
+                };
                 try {
                     msg = JSON.parse(event.data);
                 } catch {
@@ -92,7 +98,7 @@ export function useStreamingQuery(connectionId: string | null) {
                             ws.send(JSON.stringify({ type: "cancel" }));
                             return {
                                 ...prev,
-                                columns: prev.columns.length ? prev.columns : msg.columns ?? [],
+                                columns: prev.columns.length ? prev.columns : (msg.columns ?? []),
                                 rows: [...prev.rows, ...incoming.slice(0, Math.max(0, room))],
                                 received: prev.received + incoming.length,
                                 truncated: true,
@@ -101,13 +107,15 @@ export function useStreamingQuery(connectionId: string | null) {
                         }
                         return {
                             ...prev,
-                            columns: prev.columns.length ? prev.columns : msg.columns ?? [],
+                            columns: prev.columns.length ? prev.columns : (msg.columns ?? []),
                             rows: [...prev.rows, ...incoming],
                             received: prev.received + incoming.length,
                         };
                     });
                 } else if (msg.type === "done") {
-                    setResult((prev) => (prev.truncated ? prev : { ...prev, state: "done", durationMs: msg.durationMs ?? null }));
+                    setResult((prev) =>
+                        prev.truncated ? prev : { ...prev, state: "done", durationMs: msg.durationMs ?? null }
+                    );
                 } else if (msg.type === "cancelled") {
                     setResult((prev) => (prev.truncated ? prev : { ...prev, state: "cancelled" }));
                 } else if (msg.type === "error") {

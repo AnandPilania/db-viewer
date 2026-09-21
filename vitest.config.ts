@@ -8,13 +8,13 @@ import { defineConfig } from "vitest/config";
  * or a live database.
  */
 export default defineConfig({
-  // The web app's own alias, so tests can import its modules by the same
-  // specifier the app uses.
-  resolve: {
-    alias: { "@": path.resolve(import.meta.dirname, "apps/web/src") },
-  },
-  test: {
-    include: ["tests/**/*.test.ts"],
-    environment: "node",
-  },
+    // The web app's own alias, so tests can import its modules by the same
+    // specifier the app uses.
+    resolve: {
+        alias: { "@": path.resolve(import.meta.dirname, "apps/web/src") },
+    },
+    test: {
+        include: ["tests/**/*.test.ts"],
+        environment: "node",
+    },
 });

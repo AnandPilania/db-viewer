@@ -1,0 +1,8 @@
+dist
+node_modules
+public
+server
+.data
+coverage
+pnpm-lock.yaml
+*.md

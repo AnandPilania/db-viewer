@@ -38,7 +38,8 @@ export function validateValue(raw: string, column: ColumnDefinition): Validation
         case "date":
         case "datetime": {
             const d = new Date(trimmed);
-            if (Number.isNaN(d.getTime())) return { valid: false, value: raw, error: `${column.name} must be a valid date` };
+            if (Number.isNaN(d.getTime()))
+                return { valid: false, value: raw, error: `${column.name} must be a valid date` };
             return { valid: true, value: column.type === "date" ? trimmed : d.toISOString(), error: null };
         }
         case "json": {

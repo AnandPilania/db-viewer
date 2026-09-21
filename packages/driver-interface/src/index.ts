@@ -19,16 +19,7 @@
 
 export type QueryLanguage = "sql" | "mongo" | "redis-command";
 
-export type ColumnType =
-    | "string"
-    | "number"
-    | "boolean"
-    | "date"
-    | "datetime"
-    | "json"
-    | "binary"
-    | "null"
-    | "unknown";
+export type ColumnType = "string" | "number" | "boolean" | "date" | "datetime" | "json" | "binary" | "null" | "unknown";
 
 export interface ColumnDefinition {
     name: string;
@@ -123,6 +114,16 @@ export interface ConnectionConfig {
      * Ignored when `readOnly` is set.
      */
     installCdc?: boolean;
+    /**
+     * Opt-in mirror of `readOnly`: whether this connection's widgets may sit
+     * on a dashboard alongside widgets from OTHER connections. Off by
+     * default, because an embedded dashboard's share token grants read
+     * access to every connection its widgets touch — mixing a scratch
+     * database into the same dashboard as prod means one link now covers
+     * both. A dashboard whose widgets all come from one connection is
+     * unaffected either way.
+     */
+    allowMultiDbDashboards?: boolean;
     extra?: Record<string, unknown>; // driver-specific overflow (e.g. mongo replica set opts)
 }
 
@@ -221,7 +222,8 @@ export interface QueryRowsOptions {
     table: string;
     schema?: string;
     columns?: string[]; // omit for all columns
-    filters?: QueryFilter[];
+    /** AND-joined. Entries may be groups, so `a AND (b OR c)` is expressible. */
+    filters?: FilterNode[];
     /**
      * Sort order. The table's primary key is always appended as a tiebreaker
      * so paging is deterministic even when the sort column has duplicates.
@@ -251,8 +253,204 @@ export interface QueryRowsOptions {
 
 export interface QueryFilter {
     column: string;
-    op: "=" | "!=" | ">" | ">=" | "<" | "<=" | "like" | "in" | "is_null" | "is_not_null";
+    op: FilterOperator;
     value?: unknown;
+}
+
+/**
+ * `contains`/`starts_with`/`ends_with` are LIKE with the wildcards supplied
+ * for you, and with any % or _ inside the user's own text escaped — typing
+ * "50%" should search for "50%", not for "50 followed by anything".
+ * `like`/`not_like` stay raw for people who want to write the pattern.
+ */
+export type FilterOperator =
+    | "="
+    | "!="
+    | ">"
+    | ">="
+    | "<"
+    | "<="
+    | "like"
+    | "not_like"
+    | "contains"
+    | "not_contains"
+    | "starts_with"
+    | "ends_with"
+    | "in"
+    | "not_in"
+    | "between"
+    | "is_null"
+    | "is_not_null";
+
+/**
+ * A parenthesised set of conditions joined by one operator, so a filter can
+ * express `a AND (b OR c)` rather than only a flat AND-chain. Groups nest.
+ */
+export interface FilterGroup {
+    combinator: "and" | "or";
+    conditions: FilterNode[];
+}
+
+export type FilterNode = QueryFilter | FilterGroup;
+
+export function isFilterGroup(node: FilterNode): node is FilterGroup {
+    return "combinator" in node;
+}
+
+/** Every condition in a tree, in order — for callers that can only honour a flat list (see the Redis driver). */
+export function flattenFilters(nodes: FilterNode[]): QueryFilter[] {
+    return nodes.flatMap((n) => (isFilterGroup(n) ? flattenFilters(n.conditions) : [n]));
+}
+
+const COMPARISON_OPS = new Set(["=", "!=", ">", ">=", "<", "<="]);
+
+/** Neutralises wildcards inside text the user meant literally. Pairs with `ESCAPE '\'`. */
+function escapeLike(value: unknown): string {
+    return String(value ?? "").replace(/[\\%_]/g, "\\$&");
+}
+
+/** The same, for a Mongo regex — every character the engine would treat as syntax. */
+function escapeRegex(value: unknown): string {
+    return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export interface FilterSqlOptions {
+    /** Wraps an identifier in the dialect's quoting, e.g. double-quoted or backticked. */
+    quote: (identifier: string) => string;
+    /**
+     * Renders one value as SQL text and records it. Drivers with a real
+     * binder push onto their params array and return a placeholder; ClickHouse,
+     * whose HTTP interface has no binder, returns an escaped literal instead.
+     */
+    bind: (value: unknown) => string;
+    /** Dialects that spell LIKE differently (none so far) can override it. */
+    like?: string;
+    /**
+     * ClickHouse's LIKE already treats backslash as the escape character and
+     * rejects an ESCAPE clause, so it opts out; everything else needs the
+     * clause for escaped wildcards to mean anything.
+     */
+    likeEscape?: boolean;
+}
+
+/**
+ * Compiles a filter tree to a SQL boolean expression, or "" when there is
+ * nothing to filter by. The top-level array is joined with AND.
+ *
+ * Shared rather than per-driver because this is the one place user input
+ * becomes SQL text: column names are checked against the identifier charset,
+ * operators against a closed set, and values only ever reach the query
+ * through `bind`. Four copies of that logic had already drifted apart in
+ * which operators each accepted.
+ */
+export function compileFilters(nodes: FilterNode[] | undefined, opts: FilterSqlOptions): string {
+    if (!nodes?.length) return "";
+    const parts = nodes.map((node) => compileNode(node, opts)).filter(Boolean);
+    return parts.join(" AND ");
+}
+
+function compileNode(node: FilterNode, opts: FilterSqlOptions): string {
+    if (isFilterGroup(node)) {
+        if (node.combinator !== "and" && node.combinator !== "or") {
+            throw new Error(`Invalid filter combinator: ${JSON.stringify(node.combinator)}`);
+        }
+        const inner = node.conditions.map((c) => compileNode(c, opts)).filter(Boolean);
+        if (inner.length === 0) return "";
+        // An OR group must keep its parentheses or it swallows the AND
+        // chain around it; a single-child group doesn't need them.
+        return inner.length === 1 ? inner[0] : `(${inner.join(` ${node.combinator.toUpperCase()} `)})`;
+    }
+
+    assertSafeIdentifier(node.column, "filter column");
+    const col = opts.quote(node.column);
+    const like = opts.like ?? "LIKE";
+
+    const likeExpr = (pattern: string, negated: boolean) =>
+        `${col} ${negated ? `NOT ${like}` : like} ${opts.bind(pattern)}${opts.likeEscape === false ? "" : " ESCAPE '\\'"}`;
+
+    switch (node.op) {
+        case "is_null":
+            return `${col} IS NULL`;
+        case "is_not_null":
+            return `${col} IS NOT NULL`;
+        case "like":
+        case "not_like":
+            // Raw pattern: the user is writing the wildcards, so no escaping
+            // and no ESCAPE clause to change what their backslashes mean.
+            return `${col} ${node.op === "not_like" ? `NOT ${like}` : like} ${opts.bind(node.value)}`;
+        case "contains":
+        case "not_contains":
+            return likeExpr(`%${escapeLike(node.value)}%`, node.op === "not_contains");
+        case "starts_with":
+            return likeExpr(`${escapeLike(node.value)}%`, false);
+        case "ends_with":
+            return likeExpr(`%${escapeLike(node.value)}`, false);
+        case "in":
+        case "not_in": {
+            const values = Array.isArray(node.value) ? node.value : [node.value];
+            // IN () is a syntax error in every dialect here, and an empty set
+            // matches nothing (NOT IN () matches everything) — say so directly.
+            if (values.length === 0) return node.op === "in" ? "1 = 0" : "1 = 1";
+            const list = values.map((v) => opts.bind(v)).join(", ");
+            return `${col} ${node.op === "not_in" ? "NOT IN" : "IN"} (${list})`;
+        }
+        case "between": {
+            const [low, high] = Array.isArray(node.value) ? node.value : [node.value, node.value];
+            return `${col} BETWEEN ${opts.bind(low)} AND ${opts.bind(high)}`;
+        }
+        default:
+            if (!COMPARISON_OPS.has(node.op)) throw new Error(`Invalid filter operator: ${JSON.stringify(node.op)}`);
+            return `${col} ${node.op} ${opts.bind(node.value)}`;
+    }
+}
+
+/** The same tree as a MongoDB query document. */
+export function compileFilterMatch(nodes: FilterNode[] | undefined): Record<string, unknown> {
+    if (!nodes?.length) return {};
+    const parts = nodes.map(matchNode).filter((p) => Object.keys(p).length > 0);
+    return parts.length === 0 ? {} : parts.length === 1 ? parts[0] : { $and: parts };
+}
+
+function matchNode(node: FilterNode): Record<string, unknown> {
+    if (isFilterGroup(node)) {
+        const inner = node.conditions.map(matchNode).filter((p) => Object.keys(p).length > 0);
+        if (inner.length === 0) return {};
+        if (inner.length === 1) return inner[0];
+        return { [node.combinator === "or" ? "$or" : "$and"]: inner };
+    }
+
+    assertSafeIdentifier(node.column, "filter column");
+    switch (node.op) {
+        case "is_null":
+            return { [node.column]: null };
+        case "is_not_null":
+            return { [node.column]: { $ne: null } };
+        case "like":
+            return { [node.column]: { $regex: String(node.value ?? ""), $options: "i" } };
+        case "not_like":
+            return { [node.column]: { $not: new RegExp(String(node.value ?? ""), "i") } };
+        case "contains":
+            return { [node.column]: { $regex: escapeRegex(node.value), $options: "i" } };
+        case "not_contains":
+            return { [node.column]: { $not: new RegExp(escapeRegex(node.value), "i") } };
+        case "starts_with":
+            return { [node.column]: { $regex: `^${escapeRegex(node.value)}`, $options: "i" } };
+        case "ends_with":
+            return { [node.column]: { $regex: `${escapeRegex(node.value)}$`, $options: "i" } };
+        case "in":
+            return { [node.column]: { $in: Array.isArray(node.value) ? node.value : [node.value] } };
+        case "not_in":
+            return { [node.column]: { $nin: Array.isArray(node.value) ? node.value : [node.value] } };
+        case "between": {
+            const [low, high] = Array.isArray(node.value) ? node.value : [node.value, node.value];
+            return { [node.column]: { $gte: low, $lte: high } };
+        }
+        default: {
+            const mongoOp = { "=": "$eq", "!=": "$ne", ">": "$gt", ">=": "$gte", "<": "$lt", "<=": "$lte" }[node.op];
+            if (!mongoOp) throw new Error(`Invalid filter operator: ${JSON.stringify(node.op)}`);
+            return { [node.column]: { [mongoOp]: node.value } };
+        }
+    }
 }
 
 /** Emitted by drivers that support native change notification (see DriverConnection.watchTable). */
@@ -333,21 +531,21 @@ export type RedisKeyType = "string" | "hash" | "list" | "set" | "zset" | "stream
 export type QuerySpec =
     | { language: "sql"; sql: string; params?: unknown[] }
     | {
-        language: "mongo";
-        collection: string;
-        /** Either a find() (filter/sort/limit) or an aggregate() (pipeline) — not both. */
-        filter?: Record<string, unknown>;
-        sort?: Record<string, 1 | -1>;
-        limit?: number;
-        pipeline?: Record<string, unknown>[];
-    }
+          language: "mongo";
+          collection: string;
+          /** Either a find() (filter/sort/limit) or an aggregate() (pipeline) — not both. */
+          filter?: Record<string, unknown>;
+          sort?: Record<string, 1 | -1>;
+          limit?: number;
+          pipeline?: Record<string, unknown>[];
+      }
     | {
-        language: "redis-command";
-        /** Browse keys of one type (SCAN under the hood) — see DriverConnection.queryRows for the "table" equivalent. */
-        type: RedisKeyType;
-        pattern?: string;
-        limit?: number;
-    };
+          language: "redis-command";
+          /** Browse keys of one type (SCAN under the hood) — see DriverConnection.queryRows for the "table" equivalent. */
+          type: RedisKeyType;
+          pattern?: string;
+          limit?: number;
+      };
 
 /**
  * A write/DDL query for execute(). Separate from QuerySpec because a
@@ -359,18 +557,18 @@ export type QuerySpec =
 export type ExecSpec =
     | { language: "sql"; sql: string; params?: unknown[] }
     | {
-        language: "mongo";
-        op: "insertOne" | "updateOne" | "deleteOne" | "deleteMany";
-        collection: string;
-        filter?: Record<string, unknown>;
-        update?: Record<string, unknown>;
-        doc?: Record<string, unknown>;
-    }
+          language: "mongo";
+          op: "insertOne" | "updateOne" | "deleteOne" | "deleteMany";
+          collection: string;
+          filter?: Record<string, unknown>;
+          update?: Record<string, unknown>;
+          doc?: Record<string, unknown>;
+      }
     | {
-        language: "redis-command";
-        /** Raw write command + args, e.g. ["SET", "foo", "bar"] or ["DEL", "foo"]. */
-        command: string[];
-    };
+          language: "redis-command";
+          /** Raw write command + args, e.g. ["SET", "foo", "bar"] or ["DEL", "foo"]. */
+          command: string[];
+      };
 
 export interface StreamQueryOptions {
     query: QuerySpec;
@@ -378,21 +576,82 @@ export interface StreamQueryOptions {
     signal?: AbortSignal;
 }
 
-const SQL_SAFE_LEADING_KEYWORDS = new Set(["select", "with", "explain", "show", "describe", "desc", "pragma", "values"]);
+const SQL_SAFE_LEADING_KEYWORDS = new Set([
+    "select",
+    "with",
+    "explain",
+    "show",
+    "describe",
+    "desc",
+    "pragma",
+    "values",
+]);
 // Whole-word scan for write/DDL verbs anywhere in the statement — catches a
 // write smuggled inside a CTE (`WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x`),
 // which a leading-keyword check alone would miss.
-const SQL_WRITE_VERB = /\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|merge|call|copy|vacuum|reindex|lock|replace|into\s+outfile)\b/i;
+const SQL_WRITE_VERB =
+    /\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|merge|call|copy|vacuum|reindex|lock|replace|into\s+outfile)\b/i;
 
 const REDIS_SAFE_READ_COMMANDS = new Set([
-    "get", "mget", "strlen", "getrange", "exists", "type", "ttl", "pttl", "scan", "keys", "dbsize",
-    "hget", "hmget", "hgetall", "hkeys", "hvals", "hlen", "hrandfield", "hexists", "hscan", "hstrlen",
-    "lrange", "llen", "lindex", "lpos",
-    "smembers", "scard", "sismember", "smismember", "srandmember", "sscan", "sinter", "sunion", "sdiff",
-    "zrange", "zrangebyscore", "zrevrange", "zrevrangebyscore", "zscore", "zmscore", "zcard", "zcount",
-    "zrank", "zrevrank", "zscan",
-    "xrange", "xrevrange", "xlen", "xread",
-    "ping", "echo", "info", "time", "config", "client", "object", "memory", "randomkey", "touch",
+    "get",
+    "mget",
+    "strlen",
+    "getrange",
+    "exists",
+    "type",
+    "ttl",
+    "pttl",
+    "scan",
+    "keys",
+    "dbsize",
+    "hget",
+    "hmget",
+    "hgetall",
+    "hkeys",
+    "hvals",
+    "hlen",
+    "hrandfield",
+    "hexists",
+    "hscan",
+    "hstrlen",
+    "lrange",
+    "llen",
+    "lindex",
+    "lpos",
+    "smembers",
+    "scard",
+    "sismember",
+    "smismember",
+    "srandmember",
+    "sscan",
+    "sinter",
+    "sunion",
+    "sdiff",
+    "zrange",
+    "zrangebyscore",
+    "zrevrange",
+    "zrevrangebyscore",
+    "zscore",
+    "zmscore",
+    "zcard",
+    "zcount",
+    "zrank",
+    "zrevrank",
+    "zscan",
+    "xrange",
+    "xrevrange",
+    "xlen",
+    "xread",
+    "ping",
+    "echo",
+    "info",
+    "time",
+    "config",
+    "client",
+    "object",
+    "memory",
+    "randomkey",
+    "touch",
 ]);
 
 /**
@@ -461,7 +720,11 @@ export interface DriverConnection {
     queryRows(options: QueryRowsOptions): Promise<QueryRowsResult>;
 
     /** Inserts a new record. Returns the inserted row as the driver sees it (with any DB-generated defaults filled in). */
-    insertRow(table: string, schema: string | undefined, values: Record<string, unknown>): Promise<Record<string, unknown>>;
+    insertRow(
+        table: string,
+        schema: string | undefined,
+        values: Record<string, unknown>
+    ): Promise<Record<string, unknown>>;
 
     /** Deletes the record(s) matching every column in primaryKey. */
     deleteRow(table: string, schema: string | undefined, primaryKey: Record<string, unknown>): Promise<void>;
@@ -483,11 +746,7 @@ export interface DriverConnection {
      * reference-counted resource internally if needed. Setup failures must
      * not reject asynchronously into the caller; degrade quietly instead.
      */
-    watchTable?(
-        table: string,
-        schema: string | undefined,
-        onChange: (event: RowChangeEvent) => void
-    ): () => void;
+    watchTable?(table: string, schema: string | undefined, onChange: (event: RowChangeEvent) => void): () => void;
 
     /** Fast, approximate — reads DB statistics, not a full scan. */
     estimateRowCount(table: string, schema?: string): Promise<RowCountEstimate>;

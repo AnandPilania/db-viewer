@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
-import type { ColumnDefinition } from "@pilaniaanand/driver-interface";
+import type { ColumnDefinition, FilterNode } from "@pilaniaanand/driver-interface";
 import { api } from "@/lib/api";
 import { applyRowChange } from "@/lib/apply-row-change";
 import type { RowChangeEvent } from "@/hooks/useTableRealtime";
@@ -45,13 +45,14 @@ const FIRST_PAGE: PageParam = { cursor: null, seek: null, index: 0 };
 export function useTableRows(connectionId: string | null, table: string | null, schema?: string) {
     const queryClient = useQueryClient();
     const [sort, setSort] = useState<TableSort | null>(null);
+    const [filters, setFilters] = useState<FilterNode[]>([]);
     /** Non-null once the user has jumped; the window's rows start at an unknown absolute offset. */
     const [anchor, setAnchor] = useState<{ seek: unknown[]; label: string } | null>(null);
     const [localRows, setLocalRows] = useState<Record<string, unknown>[] | null>(null);
 
     const queryKey = useMemo(
-        () => ["table-rows", connectionId, schema ?? null, table, sort, anchor?.seek ?? null] as const,
-        [connectionId, schema, table, sort, anchor]
+        () => ["table-rows", connectionId, schema ?? null, table, sort, filters, anchor?.seek ?? null] as const,
+        [connectionId, schema, table, sort, filters, anchor]
     );
 
     const query = useInfiniteQuery({
@@ -65,6 +66,7 @@ export function useTableRows(connectionId: string | null, table: string | null, 
                 afterCursor: pageParam.cursor,
                 seek: pageParam.seek,
                 sort: sort ? [sort] : undefined,
+                filters: filters.length ? filters : undefined,
                 signal,
             }),
         getNextPageParam: (lastPage, _all, lastParam): PageParam | null =>
@@ -79,10 +81,7 @@ export function useTableRows(connectionId: string | null, table: string | null, 
         retry: 1,
     });
 
-    const fetchedRows = useMemo(
-        () => (query.data ? query.data.pages.flatMap((p) => p.rows) : []),
-        [query.data]
-    );
+    const fetchedRows = useMemo(() => (query.data ? query.data.pages.flatMap((p) => p.rows) : []), [query.data]);
 
     // Optimistic edits/inserts/deletes and realtime patches are applied to a
     // local overlay rather than into the query cache, so a background refetch
@@ -92,19 +91,32 @@ export function useTableRows(connectionId: string | null, table: string | null, 
     const columns: ColumnDefinition[] = query.data?.pages[0]?.columns ?? [];
     const orderBy = query.data?.pages[0]?.orderBy ?? [];
     const columnsRef = useRef<ColumnDefinition[]>(columns);
-    columnsRef.current = columns;
+    // Synced after each commit (not during render) so applyChangeEvent, which
+    // reads it from an event-handler callback, always sees the latest value.
+    useEffect(() => {
+        columnsRef.current = columns;
+    });
 
     // Drop the overlay whenever fresh server data arrives, so it can never
-    // outlive the rows it was patching.
-    useEffect(() => {
+    // outlive the rows it was patching. Adjusted during render (React's
+    // documented pattern for resetting state when an input changes) rather
+    // than in an effect, so there's no extra frame where the overlay still
+    // shows rows from before the new data arrived.
+    const [prevFetchedRows, setPrevFetchedRows] = useState(fetchedRows);
+    if (prevFetchedRows !== fetchedRows) {
+        setPrevFetchedRows(fetchedRows);
         setLocalRows(null);
-    }, [fetchedRows]);
+    }
 
     // Reset the view — but not the user's sort — when the target changes.
-    useEffect(() => {
+    // Filters do reset: they name columns of the table being left.
+    const [prevTarget, setPrevTarget] = useState({ connectionId, table, schema });
+    if (prevTarget.connectionId !== connectionId || prevTarget.table !== table || prevTarget.schema !== schema) {
+        setPrevTarget({ connectionId, table, schema });
         setAnchor(null);
         setLocalRows(null);
-    }, [connectionId, table, schema]);
+        setFilters([]);
+    }
 
     /**
      * The absolute row number of the first resident row. Zero until pages
@@ -119,21 +131,25 @@ export function useTableRows(connectionId: string | null, table: string | null, 
 
     const loadMore = useCallback(() => {
         if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
-    }, [query.hasNextPage, query.isFetchingNextPage, query.fetchNextPage]);
+    }, [query]);
 
     /** Jump to the first row at or past `value` on the leading ordering column. */
-    const jumpTo = useCallback(
-        (value: unknown) => {
-            setLocalRows(null);
-            setAnchor({ seek: [value], label: String(value) });
-        },
-        []
-    );
+    const jumpTo = useCallback((value: unknown) => {
+        setLocalRows(null);
+        setAnchor({ seek: [value], label: String(value) });
+    }, []);
 
     /** Back to the top of the table, clearing any jump anchor. */
     const jumpToStart = useCallback(() => {
         setLocalRows(null);
         setAnchor(null);
+    }, []);
+
+    /** Replaces the WHERE clause. Like a sort change, this invalidates any jump anchor. */
+    const changeFilters = useCallback((next: FilterNode[]) => {
+        setLocalRows(null);
+        setAnchor(null);
+        setFilters(next);
     }, []);
 
     const changeSort = useCallback((next: TableSort | null) => {
@@ -196,6 +212,8 @@ export function useTableRows(connectionId: string | null, table: string | null, 
         orderBy,
         sort,
         changeSort,
+        filters,
+        changeFilters,
         /** True while the first page of a new target/sort/anchor is loading — the grid shows a skeleton, not an empty table. */
         initialLoading: query.isPending && !!connectionId && !!table,
         loading: query.isFetching,

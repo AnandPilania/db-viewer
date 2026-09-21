@@ -61,7 +61,12 @@ async function sqlFor(widget: Partial<Widget>, connId: string): Promise<{ sql: s
 describe("widget chart queries", () => {
     it("binds comparison filter values instead of concatenating them", async () => {
         const { sql, params } = await sqlFor(
-            { filters: [{ column: "total", op: ">=", value: "100" }, { column: "region", op: "like", value: "%east%" }] },
+            {
+                filters: [
+                    { column: "total", op: ">=", value: "100" },
+                    { column: "region", op: "like", value: "%east%" },
+                ],
+            },
             "c-ops"
         );
         expect(sql).toContain(`"total" >= $1`);
@@ -70,7 +75,10 @@ describe("widget chart queries", () => {
     });
 
     it("expands an `in` filter to one bound placeholder per value", async () => {
-        const { sql, params } = await sqlFor({ filters: [{ column: "status", op: "in", value: "new, paid ,shipped" }] }, "c-in");
+        const { sql, params } = await sqlFor(
+            { filters: [{ column: "status", op: "in", value: "new, paid ,shipped" }] },
+            "c-in"
+        );
         expect(sql).toContain(`"status" IN ($1, $2, $3)`);
         expect(params).toEqual(["new", "paid", "shipped"]);
     });

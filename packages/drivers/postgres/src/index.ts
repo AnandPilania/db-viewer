@@ -1,9 +1,9 @@
-/// <reference path="./pg-cursor.d.ts" />
 import pg from "pg";
 import Cursor from "pg-cursor";
 import {
     resolveSsl,
     assertSafeIdentifier,
+    compileFilters,
     diffTableSnapshots,
     keysetComparison,
     MetadataCache,
@@ -35,7 +35,6 @@ const WATCH_ROW_LIMIT = 1000;
 // handled separately) — anything else is a request body forged past the
 // frontend's own TS types, since QueryFilter.op is a closed union there but
 // req.body is untyped on arrival at the server.
-const SAFE_COMPARISON_OPS = new Set(["=", "!=", ">", ">=", "<", "<=", "like"]);
 
 /** node-postgres's ssl option accepts ca/cert/key directly as PEM strings — no temp files needed. */
 function toPgSsl(config: ConnectionConfig): pg.PoolConfig["ssl"] {
@@ -49,10 +48,27 @@ function mapPgType(dataType: string): ColumnType {
     // varying(255)", "numeric(10,2)", "text[]" — none of which change the
     // logical bucket, so strip them before matching.
     const t = dataType.toLowerCase().replace(/\(.*$/, "").replace(/\[\]$/, "").trim();
-    if (["int2", "int4", "int8", "numeric", "float4", "float8", "money", "smallint", "integer", "bigint", "real", "double precision", "decimal"].includes(t))
+    if (
+        [
+            "int2",
+            "int4",
+            "int8",
+            "numeric",
+            "float4",
+            "float8",
+            "money",
+            "smallint",
+            "integer",
+            "bigint",
+            "real",
+            "double precision",
+            "decimal",
+        ].includes(t)
+    )
         return "number";
     if (["bool", "boolean"].includes(t)) return "boolean";
-    if (["timestamp", "timestamptz", "timestamp without time zone", "timestamp with time zone"].includes(t)) return "datetime";
+    if (["timestamp", "timestamptz", "timestamp without time zone", "timestamp with time zone"].includes(t))
+        return "datetime";
     if (t === "date") return "date";
     if (["json", "jsonb"].includes(t)) return "json";
     if (["bytea"].includes(t)) return "binary";
@@ -112,7 +128,10 @@ class PostgresConnection implements DriverConnection {
         return Promise.all(
             rows.map(async (r) => {
                 const tables = await this.listTables(r.schema_name);
-                return { name: r.schema_name, tables: tables.map((t) => ({ schema: t.schema, name: t.name, kind: t.kind })) };
+                return {
+                    name: r.schema_name,
+                    tables: tables.map((t) => ({ schema: t.schema, name: t.name, kind: t.kind })),
+                };
             })
         );
     }
@@ -251,7 +270,6 @@ class PostgresConnection implements DriverConnection {
         assertSafeIdentifier(options.table, "table");
         assertSafeIdentifier(schema, "schema");
         for (const c of options.columns ?? []) assertSafeIdentifier(c, "column");
-        for (const f of options.filters ?? []) assertSafeIdentifier(f.column, "column");
         for (const s of options.sort ?? []) assertSafeIdentifier(s.column, "sort column");
 
         // Cached: these are catalog queries, and re-running them for every
@@ -291,20 +309,16 @@ class PostgresConnection implements DriverConnection {
             keysetPredicate(options.seek.slice(0, orderCols.length), true);
         }
 
-        for (const f of options.filters ?? []) {
-            if (f.op === "is_null") where.push(`"${f.column}" IS NULL`);
-            else if (f.op === "is_not_null") where.push(`"${f.column}" IS NOT NULL`);
-            else if (f.op === "in" && Array.isArray(f.value)) {
-                const placeholders = f.value.map(() => `$${p++}`).join(", ");
-                where.push(`"${f.column}" IN (${placeholders})`);
-                params.push(...f.value);
-            } else {
-                if (!SAFE_COMPARISON_OPS.has(f.op)) throw new Error(`Invalid filter operator: ${JSON.stringify(f.op)}`);
-                const opSql = f.op === "like" ? "LIKE" : f.op;
-                where.push(`"${f.column}" ${opSql} $${p++}`);
-                params.push(f.value);
-            }
-        }
+        // Columns, operators and combinators are validated inside the shared
+        // compiler; values only ever arrive as bound parameters.
+        const filterSql = compileFilters(options.filters, {
+            quote,
+            bind: (value) => {
+                params.push(value);
+                return `$${p++}`;
+            },
+        });
+        if (filterSql) where.push(filterSql);
 
         const orderSql = orderBy.map((o) => `${quote(o.column)} ${o.direction === "desc" ? "DESC" : "ASC"}`).join(", ");
         const sql = `SELECT ${selectCols} FROM "${schema}"."${options.table}" ${
@@ -370,7 +384,7 @@ class PostgresConnection implements DriverConnection {
         const chunkSize = options.chunkSize ?? 500;
         try {
             const cursor = client.query(new Cursor(sql, params));
-            const onAbort = () => cursor.close(() => { });
+            const onAbort = () => cursor.close(() => {});
             options.signal?.addEventListener("abort", onAbort, { once: true });
             try {
                 // pg-cursor doesn't expose column metadata cleanly until first read; leave empty and let caller infer from row keys.
@@ -426,7 +440,10 @@ class PostgresConnection implements DriverConnection {
         const sql = cols.length
             ? `INSERT INTO "${s}"."${table}" (${colList}) VALUES (${placeholders}) RETURNING *`
             : `INSERT INTO "${s}"."${table}" DEFAULT VALUES RETURNING *`;
-        const { rows } = await this.pool.query(sql, cols.map((c) => values[c]));
+        const { rows } = await this.pool.query(
+            sql,
+            cols.map((c) => values[c])
+        );
         return rows[0];
     }
 
@@ -457,7 +474,10 @@ class PostgresConnection implements DriverConnection {
         if (pkCols.length === 0) throw new Error("deleteRow requires at least one primary key column");
         for (const c of pkCols) assertSafeIdentifier(c, "column");
         const whereClause = pkCols.map((c, i) => `"${c}" = $${i + 1}`).join(" AND ");
-        await this.pool.query(`DELETE FROM "${s}"."${table}" WHERE ${whereClause}`, pkCols.map((c) => primaryKey[c]));
+        await this.pool.query(
+            `DELETE FROM "${s}"."${table}" WHERE ${whereClause}`,
+            pkCols.map((c) => primaryKey[c])
+        );
     }
 
     /**
@@ -622,8 +642,8 @@ class PostgresConnection implements DriverConnection {
                         parsed.op === "INSERT"
                             ? { type: "insert", row: parsed.row }
                             : parsed.op === "DELETE"
-                                ? { type: "delete", primaryKey: parsed.row }
-                                : { type: "update", primaryKey: parsed.row, column: "__row__", value: parsed.row };
+                              ? { type: "delete", primaryKey: parsed.row }
+                              : { type: "update", primaryKey: parsed.row, column: "__row__", value: parsed.row };
                     for (const handler of handlers) handler(event);
                 });
             })();
@@ -688,7 +708,12 @@ export const postgresDriver: DatabaseDriver = {
             ssl: toPgSsl(config),
             max: 10,
         });
-        return new PostgresConnection(config.id, pool, !!config.readOnly || process.env.DB_VIEWER_READ_ONLY === "true", !!config.installCdc);
+        return new PostgresConnection(
+            config.id,
+            pool,
+            !!config.readOnly || process.env.DB_VIEWER_READ_ONLY === "true",
+            !!config.installCdc
+        );
     },
 };
 
