@@ -11,14 +11,16 @@ import {
 import { connectionRoutes } from "./routes/connections.js";
 import { streamRoutes } from "./routes/stream.js";
 import { exportRoutes } from "./routes/export.js";
-import { widgetRoutes } from "./routes/widgets.js";
-import { dashboardRoutes } from "./routes/dashboards.js";
 import { watchRoutes } from "./routes/watch.js";
-import { publicWatchRoutes } from "./routes/public-watch.js";
 import { clientErrorRoutes } from "./routes/client-errors.js";
 import { registry } from "./registry.js";
 import { logger } from "./logger.js";
 import { usingLocalKeyFile } from "./crypto.js";
+import { connectionStore } from "./connection-store.js";
+import { tableEvents, ensureNativeWatch, releaseNativeWatch } from "./table-events.js";
+import { assertWritable, ReadOnlyError } from "./read-only.js";
+import { recordCreateRoutes } from "@pilaniaanand/module-record-create/server";
+import { dashboardModuleRoutes } from "@pilaniaanand/module-dashboards/server";
 
 // Anything that reaches here would otherwise crash the process silently (or
 // with only a stdout stack trace lost the moment the terminal closes) — log
@@ -62,12 +64,11 @@ await app.register(corsPlugin);
 await app.register(websocketPlugin);
 
 await app.register(connectionRoutes);
+await app.register(recordCreateRoutes, { connectionStore, tableEvents, assertWritable, ReadOnlyError });
 await app.register(streamRoutes);
 await app.register(exportRoutes);
-await app.register(widgetRoutes);
-await app.register(dashboardRoutes);
+await app.register(dashboardModuleRoutes, { connectionStore, tableEvents, ensureNativeWatch, releaseNativeWatch });
 await app.register(watchRoutes);
-await app.register(publicWatchRoutes);
 await app.register(clientErrorRoutes);
 
 app.get("/api/health", async () => ({ ok: true }));

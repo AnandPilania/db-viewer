@@ -1,4 +1,5 @@
 import { assertSafeIdentifier } from "@pilaniaanand/driver-interface";
+import { chartShapeOf } from "./chart-shapes.js";
 import type {
     Aggregation,
     ChartType,
@@ -23,8 +24,12 @@ import type {
  *
  * Everything that reaches SQL is checked against a closed set here, so
  * chart-query only ever concatenates values this module has approved.
+ *
+ * chartType itself is checked against chart-shapes.ts's registry instead of
+ * a literal Set here — that's the module's extension point, so a chart type
+ * registered there (built-in or added by another module) is accepted without
+ * this file needing to know its name.
  */
-const CHART_TYPES = new Set<ChartType>(["bar", "line", "area", "scatter", "pie", "number", "table"]);
 const AGGREGATIONS = new Set<Aggregation>(["count", "sum", "avg", "min", "max"]);
 const HIGHLIGHT_OPS = new Set<HighlightOperator>(["gt", "gte", "lt", "lte", "eq"]);
 /** Filter operators become SQL text in chart-query, so they are a closed set here too. */
@@ -33,8 +38,8 @@ const TIME_BUCKETS = new Set<TimeBucket>(["day", "week", "month", "quarter", "ye
 /** Matches chart-query's MAX_LIMIT — a widget asking for more rows than a chart can render is a mistake, not a feature. */
 const MAX_LIMIT = 1000;
 
-/** Blocks `expression(...)` / `url(...)` / escapes in a CSS color that lands in a style attribute. */
-const SAFE_CSS_COLOR = /^(#[0-9a-fA-F]{3,8}|[a-zA-Z]+|rgba?\([\d\s.,%]+\)|hsla?\([\d\s.,%deg]+\))$/;
+/** Blocks `expression(...)` / `url(...)` / escapes in a CSS color that lands in a style attribute. Exported for dashboard annotations' color field (routes.ts) — same trust boundary. */
+export const SAFE_CSS_COLOR = /^(#[0-9a-fA-F]{3,8}|[a-zA-Z]+|rgba?\([\d\s.,%]+\)|hsla?\([\d\s.,%deg]+\))$/;
 
 function str(value: unknown, field: string, { required = false } = {}): string | undefined {
     if (value === undefined || value === null || value === "") {
@@ -71,8 +76,26 @@ export function validateWidgetInput(raw: unknown): WidgetInput {
     if (!raw || typeof raw !== "object") throw new Error("Request body must be a widget object");
     const body = raw as Record<string, unknown>;
 
+    // Text/annotation cards (B5) have no query at all — title + markdown/plain
+    // text only. The rest of Widget's fields (table, chartType, aggregation…)
+    // are never read for a "text" widget by any consumer, so they get inert
+    // placeholders here rather than making those fields optional everywhere
+    // they're already assumed present for a chart widget.
+    if (body.kind === "text") {
+        return {
+            title: str(body.title, "title", { required: true })!.slice(0, 200),
+            connectionId: "",
+            table: "",
+            chartType: "number",
+            aggregation: "count",
+            kind: "text",
+            content: str(body.content, "content") ?? "",
+        };
+    }
+
     const chartType = body.chartType as ChartType;
-    if (!CHART_TYPES.has(chartType)) throw new Error(`chartType must be one of: ${[...CHART_TYPES].join(", ")}`);
+    const shape = chartShapeOf(chartType);
+    if (!shape) throw new Error(`Unknown chartType: ${JSON.stringify(chartType)}`);
 
     const aggregation = body.aggregation as Aggregation;
     if (!AGGREGATIONS.has(aggregation)) throw new Error(`aggregation must be one of: ${[...AGGREGATIONS].join(", ")}`);
@@ -94,7 +117,7 @@ export function validateWidgetInput(raw: unknown): WidgetInput {
         if (value !== undefined) assertSafeIdentifier(value, name);
     }
 
-    if (aggregation !== "count" && chartType !== "table" && !fields.yField) {
+    if (aggregation !== "count" && shape !== "table" && !fields.yField) {
         throw new Error(`aggregation "${aggregation}" needs a yField`);
     }
 
@@ -143,6 +166,9 @@ export function validateWidgetInput(raw: unknown): WidgetInput {
     const sortDir = str(body.sortDir, "sortDir") as Widget["sortDir"];
     if (sortDir !== undefined && sortDir !== "asc" && sortDir !== "desc") throw new Error('sortDir must be "asc" or "desc"');
 
+    const clickParameter = str(body.clickParameter, "clickParameter");
+    const drillEnabled = body.drillEnabled === true ? true : undefined;
+
     return {
         title: str(body.title, "title", { required: true })!.slice(0, 200),
         connectionId: str(body.connectionId, "connectionId", { required: true })!,
@@ -157,6 +183,9 @@ export function validateWidgetInput(raw: unknown): WidgetInput {
         sortBy,
         sortDir,
         highlightRules: validateHighlightRules(body.highlightRules),
+        kind: "chart",
+        clickParameter,
+        drillEnabled,
     };
 }
 

@@ -47,6 +47,8 @@ const PACKAGES = [
     { name: "@pilaniaanand/driver-postgres", dir: "packages/drivers/postgres" },
     { name: "@pilaniaanand/driver-redis", dir: "packages/drivers/redis" },
     { name: "@pilaniaanand/driver-sqlite", dir: "packages/drivers/sqlite" },
+    { name: "@pilaniaanand/module-dashboards", dir: "packages/modules/dashboards" },
+    { name: "@pilaniaanand/module-record-create", dir: "packages/modules/record-create" },
     { name: "db-viewer", dir: "." }, // must be last — depends on the interface being live
 ];
 

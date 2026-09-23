@@ -1,21 +1,23 @@
 import React, { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Hash, Download, Plus, Radio, CornerUpLeft, Search } from "lucide-react";
-import type { ColumnDefinition } from "@pilaniaanand/driver-interface";
+import { Hash, Download, Radio, CornerUpLeft, Search } from "lucide-react";
+import type { ColumnDefinition, FilterNode } from "@pilaniaanand/driver-interface";
 import { api } from "@/lib/api";
 import { useTableRows } from "@/hooks/useTableRows";
 import { useTableRealtime } from "@/hooks/useTableRealtime";
 import { DataGrid } from "@/components/DataGrid";
 import { FilterBar } from "@/components/FilterBar";
-import { NewRowDialog } from "@/components/NewRowDialog";
 import { Button } from "@/components/ui/button";
+import { getGridActions } from "@/lib/gridActions";
 
 interface Props {
     connectionId: string;
     table: string;
+    /** Pre-applies one filter on mount/table-switch — how drill-to-detail (dashboards module, B3) lands here already narrowed to a data point's underlying rows. */
+    initialFilter?: FilterNode | null;
 }
 
-export function TableBrowser({ connectionId, table }: Props) {
+export function TableBrowser({ connectionId, table, initialFilter }: Props) {
     const {
         rows,
         columns,
@@ -39,10 +41,10 @@ export function TableBrowser({ connectionId, table }: Props) {
         prependRow,
         removeLocalRowAt,
         applyChangeEvent,
-    } = useTableRows(connectionId, table);
+    } = useTableRows(connectionId, table, undefined, initialFilter);
     const [wantExact, setWantExact] = useState(false);
     const [exportOpen, setExportOpen] = useState(false);
-    const [showNewRow, setShowNewRow] = useState(false);
+    const [openActionId, setOpenActionId] = useState<string | null>(null);
     const [jumpValue, setJumpValue] = useState("");
     const [actionError, setActionError] = useState<string | null>(null);
 
@@ -107,19 +109,6 @@ export function TableBrowser({ connectionId, table }: Props) {
             // error, permission) instead of swallowing it behind a generic message.
             setActionError((err as Error).message);
             return false;
-        }
-    }
-
-    async function handleCreateRow(
-        values: Record<string, unknown>
-    ): Promise<{ ok: true } | { ok: false; error: string }> {
-        try {
-            const inserted = await api.insertRow(connectionId, table, { values });
-            prependRow(inserted);
-            setShowNewRow(false);
-            return { ok: true };
-        } catch (err) {
-            return { ok: false, error: (err as Error).message };
         }
     }
 
@@ -228,9 +217,16 @@ export function TableBrowser({ connectionId, table }: Props) {
                         </Button>
                     )}
 
-                    <Button size="sm" variant="secondary" onClick={() => setShowNewRow(true)}>
-                        <Plus size={12} /> New row
-                    </Button>
+                    {getGridActions().map((action) => (
+                        <Button
+                            key={action.id}
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => setOpenActionId(action.id)}
+                        >
+                            <action.icon size={12} /> {action.label}
+                        </Button>
+                    ))}
 
                     <div className="relative" onKeyDown={(e) => e.key === "Escape" && setExportOpen(false)}>
                         <Button
@@ -313,14 +309,16 @@ export function TableBrowser({ connectionId, table }: Props) {
                 />
             </div>
 
-            {showNewRow && (
-                <NewRowDialog
-                    table={table}
-                    columns={columns}
-                    onCancel={() => setShowNewRow(false)}
-                    onSubmit={handleCreateRow}
-                />
-            )}
+            {openActionId &&
+                getGridActions()
+                    .find((a) => a.id === openActionId)
+                    ?.render({
+                        connectionId,
+                        table,
+                        columns,
+                        onRowCreated: (row) => prependRow(row),
+                        close: () => setOpenActionId(null),
+                    })}
         </div>
     );
 }

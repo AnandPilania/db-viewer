@@ -96,6 +96,60 @@ class SqliteConnection implements DriverConnection {
         });
     }
 
+    /** Extracts the declared length out of a type string like "VARCHAR(255)". */
+    private extractMaxLength(type: string): number | undefined {
+        const match = type.match(/\((\d+)\)/);
+        return match ? Number(match[1]) : undefined;
+    }
+
+    /**
+     * Best-effort per-column uniqueness from single-column unique indexes
+     * (`PRAGMA index_list` + `index_info`). A composite unique index doesn't
+     * make any one column unique on its own, so those are skipped.
+     */
+    private uniqueColumns(table: string): Set<string> {
+        const unique = new Set<string>();
+        try {
+            const indexes = this.db.prepare(`PRAGMA index_list("${table}")`).all() as {
+                name: string;
+                unique: number;
+            }[];
+            for (const idx of indexes) {
+                if (!idx.unique) continue;
+                const cols = this.db.prepare(`PRAGMA index_info("${idx.name}")`).all() as { name: string }[];
+                if (cols.length === 1 && cols[0].name) unique.add(cols[0].name);
+            }
+        } catch {
+            /* best-effort — leave isUnique unset */
+        }
+        return unique;
+    }
+
+    /**
+     * Best-effort per-column CHECK clause text, regexed out of the table's
+     * own CREATE TABLE text — SQLite exposes no structured constraint
+     * catalog the way Postgres/MySQL do. Display-only, never evaluated.
+     */
+    private checkExpressions(table: string): Map<string, string> {
+        const checks = new Map<string, string>();
+        try {
+            const row = this.db
+                .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`)
+                .get(table) as { sql: string } | undefined;
+            if (!row?.sql) return checks;
+            // Matches "<column> ... CHECK (<expr>)" segments, one per column
+            // definition line — a best-effort scan, not a SQL parser.
+            const pattern = /(\w+)[^,()]*CHECK\s*(\([^;]*?\))(?=\s*(?:,|\)\s*;?\s*$))/gi;
+            let m: RegExpExecArray | null;
+            while ((m = pattern.exec(row.sql))) {
+                if (!checks.has(m[1])) checks.set(m[1], m[2]);
+            }
+        } catch {
+            /* best-effort — leave checkExpression unset */
+        }
+        return checks;
+    }
+
     private describeColumnsSync(table: string): ColumnDefinition[] {
         const cols = this.db.prepare(`PRAGMA table_info("${table}")`).all() as {
             name: string;
@@ -109,6 +163,8 @@ class SqliteConnection implements DriverConnection {
             table: string;
             to: string;
         }[];
+        const unique = this.uniqueColumns(table);
+        const checks = this.checkExpressions(table);
         return cols.map((c) => {
             const fk = fks.find((f) => f.from === c.name);
             return {
@@ -120,6 +176,9 @@ class SqliteConnection implements DriverConnection {
                 isForeignKey: !!fk,
                 references: fk ? { table: fk.table, column: fk.to } : undefined,
                 defaultValue: c.dflt_value,
+                maxLength: this.extractMaxLength(c.type || ""),
+                isUnique: unique.has(c.name) || undefined,
+                checkExpression: checks.get(c.name),
             };
         });
     }

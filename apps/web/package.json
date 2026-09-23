@@ -11,6 +11,8 @@
     },
     "dependencies": {
         "@pilaniaanand/driver-interface": "workspace:*",
+        "@pilaniaanand/module-dashboards": "workspace:*",
+        "@pilaniaanand/module-record-create": "workspace:*",
         "@tailwindcss/vite": "^4.3.3",
         "@tanstack/react-query": "^5.102.8",
         "@tanstack/react-virtual": "^3.14.10",
@@ -20,10 +22,7 @@
         "monaco-editor": "^0.52.2",
         "react": "^19.2.8",
         "react-dom": "^19.2.8",
-        "react-grid-layout": "^2.2.4",
-        "react-resizable": "^4.0.2",
         "reactflow": "^11.11.4",
-        "recharts": "^3.10.1",
         "tailwind-merge": "^3.6.0"
     },
     "devDependencies": {

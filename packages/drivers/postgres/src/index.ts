@@ -76,6 +76,12 @@ function mapPgType(dataType: string): ColumnType {
     return "unknown";
 }
 
+/** Extracts the declared length out of a formatted type like "character varying(255)". */
+function extractMaxLength(dataType: string): number | undefined {
+    const match = dataType.match(/^(?:character varying|character|varchar|char|bpchar)\((\d+)\)/i);
+    return match ? Number(match[1]) : undefined;
+}
+
 function encodeCursor(values: unknown[]): string {
     return Buffer.from(JSON.stringify(values)).toString("base64");
 }
@@ -173,9 +179,10 @@ class PostgresConnection implements DriverConnection {
      */
     private schemaColumns(schema: string): Promise<Map<string, ColumnDefinition[]>> {
         return this.metadata.get(`schema-cols:${schema}`, async () => {
-            const [{ rows: cols }, { rows: pks }, { rows: fks }] = await Promise.all([
-                this.pool.query(
-                    `SELECT c.relname AS table_name,
+            const [{ rows: cols }, { rows: pks }, { rows: fks }, { rows: checks }, { rows: uniques }, { rows: enums }] =
+                await Promise.all([
+                    this.pool.query(
+                        `SELECT c.relname AS table_name,
                     a.attname AS column_name,
                     format_type(a.atttypid, a.atttypmod) AS data_type,
                     NOT a.attnotnull AS nullable,
@@ -187,19 +194,19 @@ class PostgresConnection implements DriverConnection {
              WHERE n.nspname = $1 AND c.relkind IN ('r','v','m')
                AND a.attnum > 0 AND NOT a.attisdropped
              ORDER BY c.relname, a.attnum`,
-                    [schema]
-                ),
-                this.pool.query(
-                    `SELECT c.relname AS table_name, a.attname AS column_name
+                        [schema]
+                    ),
+                    this.pool.query(
+                        `SELECT c.relname AS table_name, a.attname AS column_name
              FROM pg_index i
              JOIN pg_class c ON c.oid = i.indrelid
              JOIN pg_namespace n ON n.oid = c.relnamespace
              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
              WHERE n.nspname = $1 AND i.indisprimary`,
-                    [schema]
-                ),
-                this.pool.query(
-                    `SELECT c.relname AS table_name,
+                        [schema]
+                    ),
+                    this.pool.query(
+                        `SELECT c.relname AS table_name,
                     a.attname AS column_name,
                     fc.relname AS foreign_table,
                     fa.attname AS foreign_column
@@ -212,26 +219,84 @@ class PostgresConnection implements DriverConnection {
              JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
              JOIN pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = fk.attnum
              WHERE n.nspname = $1 AND con.contype = 'f'`,
-                    [schema]
-                ),
-            ]);
+                        [schema]
+                    ),
+                    // CHECK constraints: a constraint can reference several columns, so it's
+                    // attached (display-only, never evaluated) to every column it names.
+                    this.pool.query(
+                        `SELECT c.relname AS table_name, a.attname AS column_name,
+                    pg_get_constraintdef(con.oid) AS definition
+             FROM pg_constraint con
+             JOIN pg_class c ON c.oid = con.conrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN unnest(con.conkey) AS ck(colnum) ON TRUE
+             JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ck.colnum
+             WHERE n.nspname = $1 AND con.contype = 'c'`,
+                        [schema]
+                    ),
+                    // UNIQUE constraints: only single-column ones translate to a per-column
+                    // boolean — a multi-column unique constraint doesn't make any one column
+                    // unique on its own.
+                    this.pool.query(
+                        `SELECT c.relname AS table_name, a.attname AS column_name
+             FROM pg_constraint con
+             JOIN pg_class c ON c.oid = con.conrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[1]
+             WHERE n.nspname = $1 AND con.contype = 'u' AND array_length(con.conkey, 1) = 1`,
+                        [schema]
+                    ),
+                    // Enum labels for columns whose type is a user-defined enum.
+                    this.pool.query(
+                        `SELECT c.relname AS table_name, a.attname AS column_name, e.enumlabel
+             FROM pg_attribute a
+             JOIN pg_class c ON c.oid = a.attrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_type t ON t.oid = a.atttypid
+             JOIN pg_enum e ON e.enumtypid = t.oid
+             WHERE n.nspname = $1 AND c.relkind IN ('r','v','m')
+               AND a.attnum > 0 AND NOT a.attisdropped
+             ORDER BY c.relname, a.attname, e.enumsortorder`,
+                        [schema]
+                    ),
+                ]);
 
             const pkSet = new Set(pks.map((p) => `${p.table_name}.${p.column_name}`));
             const fkMap = new Map(fks.map((f) => [`${f.table_name}.${f.column_name}`, f]));
+            const checkMap = new Map<string, string>();
+            for (const chk of checks) {
+                const key = `${chk.table_name}.${chk.column_name}`;
+                // A column can be named by more than one CHECK; keep the first and
+                // move on — this is display-only text, not something enforced here.
+                if (!checkMap.has(key)) checkMap.set(key, chk.definition);
+            }
+            const uniqueSet = new Set(uniques.map((u) => `${u.table_name}.${u.column_name}`));
+            const enumMap = new Map<string, string[]>();
+            for (const e of enums) {
+                const key = `${e.table_name}.${e.column_name}`;
+                const list = enumMap.get(key) ?? [];
+                list.push(e.enumlabel);
+                enumMap.set(key, list);
+            }
 
             const byTable = new Map<string, ColumnDefinition[]>();
             for (const c of cols) {
-                const fk = fkMap.get(`${c.table_name}.${c.column_name}`);
+                const key = `${c.table_name}.${c.column_name}`;
+                const fk = fkMap.get(key);
                 const list = byTable.get(c.table_name) ?? [];
                 list.push({
                     name: c.column_name,
                     type: mapPgType(c.data_type),
                     nativeType: c.data_type,
                     nullable: c.nullable,
-                    isPrimaryKey: pkSet.has(`${c.table_name}.${c.column_name}`),
+                    isPrimaryKey: pkSet.has(key),
                     isForeignKey: !!fk,
                     references: fk ? { table: fk.foreign_table, column: fk.foreign_column } : undefined,
                     defaultValue: c.column_default,
+                    maxLength: extractMaxLength(c.data_type),
+                    enumValues: enumMap.get(key),
+                    isUnique: uniqueSet.has(key) || undefined,
+                    checkExpression: checkMap.get(key),
                 });
                 byTable.set(c.table_name, list);
             }

@@ -17,9 +17,8 @@ export default [
             "**/.data/**",
             "**/coverage/**",
             "pnpm-lock.yaml",
-            // Committed, published build output (root `server/` mirrors apps/server's
-            // compiled dist/ for npm packaging) — not hand-written source.
             "server/**",
+            ".claude/**",
         ],
     },
 
@@ -52,9 +51,9 @@ export default [
         },
     },
 
-    // Web app: React + browser globals.
+    // Web app + web-facing module packages (packages/modules/*/src/web): React + browser globals.
     {
-        files: ["apps/web/**/*.{ts,tsx}"],
+        files: ["apps/web/**/*.{ts,tsx}", "packages/modules/*/src/web/**/*.{ts,tsx}"],
         plugins: {
             react,
             "react-hooks": reactHooks,
@@ -80,6 +79,13 @@ export default [
 
     // Entry point: mounts the app, has no exports, and is never Fast-Refreshed.
     { files: ["apps/web/src/main.tsx"], rules: { "react-refresh/only-export-components": "off" } },
+
+    // Shared UI primitives file: deliberately also exports the module-level
+    // `toast` emitter alongside components, so Fast Refresh never applies cleanly.
+    {
+        files: ["packages/modules/dashboards/src/web/ui.tsx"],
+        rules: { "react-refresh/only-export-components": "off" },
+    },
 
     // Always last: turns off stylistic rules that would fight Prettier.
     eslintConfigPrettier,

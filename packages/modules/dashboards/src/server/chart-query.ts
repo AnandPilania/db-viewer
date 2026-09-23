@@ -1,4 +1,5 @@
 import { assertSafeIdentifier, MetadataCache, type ConnectionConfig, type DriverConnection, type QuerySpec } from "@pilaniaanand/driver-interface";
+import { chartShapeOf } from "./chart-shapes.js";
 import type { FilterOperator, TimeBucket, Widget, WidgetFilter } from "./models.js";
 
 /**
@@ -82,7 +83,7 @@ const BUCKET_SQL: Record<string, Record<TimeBucket, (col: string) => string>> = 
 const MONGO_BUCKET_UNITS = new Set<TimeBucket>(["day", "week", "month", "quarter", "year"]);
 
 /** Chart row caps. A grouped summary or scatter can carry more points than a categorical bar chart; a raw-row table passes FALLBACK_LIMIT explicitly, since dumping 500 unaggregated rows into a dashboard card helps nobody. */
-const DEFAULT_LIMIT: Record<string, number> = { table: 500, scatter: 500 };
+const DEFAULT_LIMIT: Record<string, number> = { table: 500, pivot: 500, scatter: 500 };
 const FALLBACK_LIMIT = 50;
 const MAX_LIMIT = 1000;
 
@@ -98,7 +99,7 @@ function resolveLimit(widget: Widget, fallbackOverride?: number): number {
  * while a categorical breakdown stays a top-N by value.
  */
 function resolveSort(widget: Widget): { by: "value" | "label"; dir: "asc" | "desc" } {
-    const by = widget.sortBy ?? (widget.xBucket || widget.chartType === "table" ? "label" : "value");
+    const by = widget.sortBy ?? (widget.xBucket || chartShapeOf(widget.chartType) === "table" ? "label" : "value");
     return { by, dir: widget.sortDir ?? (by === "label" ? "asc" : "desc") };
 }
 
@@ -107,6 +108,30 @@ const VALUE_OPS = new Set<FilterOperator>(["=", "!=", ">", ">=", "<", "<=", "lik
 
 function inList(value: string): string[] {
     return value.split(",").map((v) => v.trim()).filter((v) => v !== "");
+}
+
+/** Matches a whole filter value of the form `{{param_name}}` — a dashboard-parameter placeholder, not a literal. */
+const PLACEHOLDER_RE = /^\{\{(\w+)\}\}$/;
+
+/**
+ * Resolves a filter's value against dashboard/embed params: a literal value
+ * passes through unchanged, a `{{name}}` placeholder is looked up in
+ * `dashboardParams`.
+ *
+ * Returns `undefined` when a placeholder's param was not supplied — the
+ * caller then drops that filter entirely (treated as "no constraint"). This
+ * is the simpler and safer of the two options the plan allows: a
+ * not-yet-chosen filter-bar value is the normal state (e.g. before a viewer
+ * picks one), not an error condition, and "no constraint" can never produce
+ * an unintentionally *narrower* or wrong result — only a broader one, same
+ * as the filter not existing at all.
+ */
+function resolveFilterValue(filter: WidgetFilter, dashboardParams: Record<string, unknown>): string | undefined {
+    const name = PLACEHOLDER_RE.exec(filter.value)?.[1];
+    if (!name) return filter.value;
+    const value = dashboardParams[name];
+    if (value === undefined || value === null || value === "") return undefined;
+    return String(value);
 }
 
 /**
@@ -118,11 +143,16 @@ function inList(value: string): string[] {
  * the caller, so the only thing that varies freely is the value — and that
  * is always bound, never concatenated, except on ClickHouse where this
  * driver's HTTP call has no binder and values go through chLiteral.
+ *
+ * `dashboardParams` resolves any `{{param_name}}` filter value (see
+ * resolveFilterValue); a widget with no such placeholders ignores it
+ * entirely and behaves exactly as before.
  */
 function buildWhere(
     driver: string,
     filters: WidgetFilter[],
-    params: unknown[]
+    params: unknown[],
+    dashboardParams: Record<string, unknown> = {}
 ): string {
     const clauses: string[] = [];
     const bind = (value: unknown): string => {
@@ -137,41 +167,53 @@ function buildWhere(
             throw new Error(`Unsupported filter operator: ${JSON.stringify(op)}`);
         }
         const col = quoteIdent(driver, f.column);
-        if (op === "is null") clauses.push(`${col} IS NULL`);
-        else if (op === "is not null") clauses.push(`${col} IS NOT NULL`);
-        else if (op === "in") {
-            const values = inList(f.value);
+        if (op === "is null") { clauses.push(`${col} IS NULL`); continue; }
+        if (op === "is not null") { clauses.push(`${col} IS NOT NULL`); continue; }
+
+        const value = resolveFilterValue(f, dashboardParams);
+        if (value === undefined) continue; // unset dashboard param — filter dropped, see resolveFilterValue
+
+        if (op === "in") {
+            const values = inList(value);
             if (values.length === 0) throw new Error(`Filter on "${f.column}" uses "in" but lists no values`);
             clauses.push(`${col} IN (${values.map(bind).join(", ")})`);
         } else {
-            clauses.push(`${col} ${op.toUpperCase()} ${bind(f.value)}`);
+            clauses.push(`${col} ${op.toUpperCase()} ${bind(value)}`);
         }
     }
     return clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 }
 
-/** The same filters as a Mongo `$match`. Kept beside buildWhere so the two can't drift apart. */
-function buildMatch(filters: WidgetFilter[]): Record<string, unknown> {
+/**
+ * The same filters as a Mongo `$match`. Kept beside buildWhere so the two
+ * can't drift apart. `dashboardParams` resolves `{{param_name}}` values the
+ * same way buildWhere does (see resolveFilterValue).
+ */
+function buildMatch(filters: WidgetFilter[], dashboardParams: Record<string, unknown> = {}): Record<string, unknown> {
     const MONGO_OPS: Partial<Record<FilterOperator, string>> = {
         "!=": "$ne", ">": "$gt", ">=": "$gte", "<": "$lt", "<=": "$lte",
     };
     const match: Record<string, unknown> = {};
     for (const f of filters) {
         const op = f.op ?? "=";
-        if (op === "=") match[f.column] = f.value;
-        else if (op === "is null") match[f.column] = null;
-        else if (op === "is not null") match[f.column] = { $ne: null };
+        if (op === "is null") { match[f.column] = null; continue; }
+        if (op === "is not null") { match[f.column] = { $ne: null }; continue; }
+
+        const value = resolveFilterValue(f, dashboardParams);
+        if (value === undefined) continue; // unset dashboard param — filter dropped, see resolveFilterValue
+
+        if (op === "=") match[f.column] = value;
         else if (op === "in") {
-            const values = inList(f.value);
+            const values = inList(value);
             if (values.length === 0) throw new Error(`Filter on "${f.column}" uses "in" but lists no values`);
             match[f.column] = { $in: values };
         } else if (op === "like") {
             // SQL's % wildcard translated to a regex, with everything else escaped so a
             // filter value can't smuggle in a pattern of its own.
-            const escaped = f.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/%/g, ".*");
+            const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/%/g, ".*");
             match[f.column] = { $regex: `^${escaped}$`, $options: "i" };
         } else if (MONGO_OPS[op]) {
-            match[f.column] = { [MONGO_OPS[op]!]: f.value };
+            match[f.column] = { [MONGO_OPS[op]!]: value };
         } else {
             throw new Error(`Unsupported filter operator: ${JSON.stringify(op)}`);
         }
@@ -206,9 +248,11 @@ export interface WidgetData {
 async function runWidgetQuery(
     conn: DriverConnection,
     config: ConnectionConfig,
-    widget: Widget
+    widget: Widget,
+    dashboardParams: Record<string, unknown>
 ): Promise<WidgetData> {
-    if (config.driver === "mongodb") return fetchMongoWidgetData(conn, widget);
+    if (widget.kind === "text") throw new Error("Text widgets have no data to query");
+    if (config.driver === "mongodb") return fetchMongoWidgetData(conn, widget, dashboardParams);
     if (config.driver === "redis") return fetchRedisWidgetData(conn, widget);
     if (!SQL_DRIVERS.has(config.driver)) {
         throw new Error(`Dashboard charts aren't supported for ${config.driver} yet.`);
@@ -229,7 +273,7 @@ async function runWidgetQuery(
     const tableRef = `${schemaPrefix}${quoteIdent(driver, widget.table)}`;
 
     const params: unknown[] = [];
-    const whereSql = buildWhere(driver, widget.filters ?? [], params);
+    const whereSql = buildWhere(driver, widget.filters ?? [], params, dashboardParams);
     const limit = resolveLimit(widget);
     const { by: sortBy, dir: sortDir } = resolveSort(widget);
     const sortSql = sortDir === "asc" ? "ASC" : "DESC";
@@ -247,7 +291,11 @@ async function runWidgetQuery(
             ? "COUNT(*)"
             : `${widget.aggregation.toUpperCase()}(${quoteIdent(driver, widget.yField!)})`;
 
-    if (widget.chartType === "table") {
+    // A chart type shaped "table" (registered in chart-shapes.ts — "pivot" is
+    // one such type, added purely through the web-side chart-type registry in
+    // chartTypes.ts) is data-identical to "table"'s row × column grouping —
+    // it's a distinct author-facing chart type, not a distinct query shape.
+    if (chartShapeOf(widget.chartType) === "table") {
         if (!widget.xField) {
             const rows = await collectRows(conn, { language: "sql", sql: `SELECT * FROM ${tableRef} ${whereSql} LIMIT ${resolveLimit(widget, FALLBACK_LIMIT)}`, params });
             return { rows, xKey: "", yKey: "" };
@@ -267,12 +315,12 @@ async function runWidgetQuery(
         return { rows, xKey: "x", yKey: "y", x2Key: widget.xField2 ? "x2" : undefined };
     }
 
-    if (widget.chartType === "number") {
+    if (chartShapeOf(widget.chartType) === "number") {
         const rows = await collectRows(conn, { language: "sql", sql: `SELECT ${yExpr} AS y FROM ${tableRef} ${whereSql}`, params });
         return { rows, xKey: "", yKey: "y" };
     }
 
-    if (widget.chartType === "scatter") {
+    if (chartShapeOf(widget.chartType) === "raw") {
         // Raw (x, y) pairs, not aggregated — unlike bar/line/area, a scatter plot shows every row.
         if (!widget.xField || !widget.yField) throw new Error("Scatter charts need both an x and y column");
         const sql = `SELECT ${quoteIdent(driver, widget.xField)} AS x, ${quoteIdent(driver, widget.yField)} AS y FROM ${tableRef} ${whereSql} LIMIT ${limit}`;
@@ -296,7 +344,11 @@ async function runWidgetQuery(
  * inferred schema (from `listTables`) before it goes anywhere near a
  * `$group`/`$match` stage.
  */
-async function fetchMongoWidgetData(conn: DriverConnection, widget: Widget): Promise<WidgetData> {
+async function fetchMongoWidgetData(
+    conn: DriverConnection,
+    widget: Widget,
+    dashboardParams: Record<string, unknown>
+): Promise<WidgetData> {
     // `aggregation` becomes a `$sum`/`$avg`/... accumulator key below, so it
     // needs the same closed-set check the SQL path gets.
     if (!SQL_AGGREGATIONS.has(widget.aggregation)) {
@@ -311,7 +363,7 @@ async function fetchMongoWidgetData(conn: DriverConnection, widget: Widget): Pro
         if (field && !validFields.has(field)) throw new Error(`Field "${field}" does not exist on ${widget.table}`);
     }
 
-    const match = buildMatch(widget.filters ?? []);
+    const match = buildMatch(widget.filters ?? [], dashboardParams);
     const limit = resolveLimit(widget);
     const { by: sortBy, dir: sortDir } = resolveSort(widget);
     const sortSign = sortDir === "asc" ? 1 : -1;
@@ -329,7 +381,7 @@ async function fetchMongoWidgetData(conn: DriverConnection, widget: Widget): Pro
     const pipeline: Record<string, unknown>[] = [];
     if (Object.keys(match).length) pipeline.push({ $match: match });
 
-    if (widget.chartType === "table") {
+    if (chartShapeOf(widget.chartType) === "table") {
         if (!widget.xField) {
             const rows = await collectRows(conn, { language: "mongo", collection: widget.table, filter: match, limit: resolveLimit(widget, FALLBACK_LIMIT) });
             return { rows, xKey: "", yKey: "" };
@@ -345,14 +397,14 @@ async function fetchMongoWidgetData(conn: DriverConnection, widget: Widget): Pro
         return { rows, xKey: "x", yKey: "y", x2Key: widget.xField2 ? "x2" : undefined };
     }
 
-    if (widget.chartType === "number") {
+    if (chartShapeOf(widget.chartType) === "number") {
         pipeline.push({ $group: { _id: null, y: accumulator } });
         pipeline.push({ $project: { _id: 0, y: 1 } });
         const rows = await collectRows(conn, { language: "mongo", collection: widget.table, pipeline });
         return { rows, xKey: "", yKey: "y" };
     }
 
-    if (widget.chartType === "scatter") {
+    if (chartShapeOf(widget.chartType) === "raw") {
         // Raw (x, y) pairs, not aggregated — unlike bar/line/area, a scatter plot shows every document.
         if (!widget.xField || !widget.yField) throw new Error("Scatter charts need both an x and y column");
         pipeline.push({ $project: { x: `$${widget.xField}`, y: `$${widget.yField}`, _id: 0 } });
@@ -380,15 +432,16 @@ async function fetchMongoWidgetData(conn: DriverConnection, widget: Widget): Pro
  * "table" (a browse) are the two shapes that actually mean something here.
  */
 async function fetchRedisWidgetData(conn: DriverConnection, widget: Widget): Promise<WidgetData> {
-    if (widget.chartType === "table") {
+    const shape = chartShapeOf(widget.chartType);
+    if (shape === "table") {
         const page = await conn.queryRows({ table: widget.table, pageSize: resolveLimit(widget, FALLBACK_LIMIT), afterCursor: null });
         return { rows: page.rows, xKey: "", yKey: "" };
     }
-    if (widget.chartType === "number") {
+    if (shape === "number") {
         const count = await conn.countRowsExact(widget.table);
         return { rows: [{ y: count.value }], xKey: "", yKey: "y" };
     }
-    throw new Error(`Redis widgets only support "number" and "table" chart types — there's no field to group ${widget.chartType} charts by across keys.`);
+    throw new Error(`Redis widgets only support "number"/"table"-shaped chart types — there's no field to group ${widget.chartType} charts by across keys.`);
 }
 
 /**
@@ -415,13 +468,18 @@ const widgetDataCache = new MetadataCache(WIDGET_DATA_TTL_MS);
  * Keyed on the widget's full definition rather than its id, so editing a
  * widget takes effect immediately instead of after the TTL — and on the
  * connection id, so two widgets that differ only by connection never share
- * a result.
+ * a result. `dashboardParams` (dashboard filter-bar / embed values, resolved
+ * into any `{{param_name}}` filter — see resolveFilterValue) is folded into
+ * the same key, so two viewers with different filter selections never share
+ * a cached result; a widget with no placeholders is called with `{}` here
+ * and produces the exact same key/query as before this feature existed.
  */
 export function fetchWidgetData(
     conn: DriverConnection,
     config: ConnectionConfig,
-    widget: Widget
+    widget: Widget,
+    dashboardParams: Record<string, unknown> = {}
 ): Promise<WidgetData> {
-    const key = `${conn.id}:${JSON.stringify(widget)}`;
-    return widgetDataCache.get(key, () => runWidgetQuery(conn, config, widget));
+    const key = `${conn.id}:${JSON.stringify(widget)}:${JSON.stringify(dashboardParams)}`;
+    return widgetDataCache.get(key, () => runWidgetQuery(conn, config, widget, dashboardParams));
 }

@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* Web-facing module packages (@pilaniaanand/module-*) resolve through a pnpm
+   workspace symlink under node_modules, which Tailwind's automatic content
+   detection skips by default — without this, none of their classes (not just
+   arbitrary-value ones) make it into the built CSS. */
+@source "../../../packages/modules/*/src/web/**/*.{ts,tsx}";
+
 @theme {
     --color-border: hsl(240 4% 20%);
     --color-input: hsl(240 4% 20%);

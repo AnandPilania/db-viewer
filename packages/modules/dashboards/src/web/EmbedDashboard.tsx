@@ -1,8 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Radio } from "lucide-react";
-import { ChartRenderer } from "@/components/ChartRenderer";
-import type { HighlightRule, WidgetData } from "@/lib/api";
+import { ChartRenderer } from "./ChartRenderer.js";
+import { ParameterFilterBar } from "./ParameterFilterBar.js";
+import type { DashboardParameter, HighlightRule, WidgetData } from "./api.js";
 
 interface PublicWidget {
     id: string;
@@ -16,6 +17,19 @@ interface PublicDashboard {
     id: string;
     title: string;
     widgets: PublicWidget[];
+    /**
+     * Filter-bar controls the viewer may adjust. With a plain opaque
+     * shareToken this is every dashboard parameter (today's unrestricted
+     * behavior). With a signed embed token (Part C), the server has already
+     * dropped any parameter the token locked — those render no control here
+     * at all, not even a disabled one.
+     */
+    parameters?: DashboardParameter[];
+}
+
+function paramsQuery(params: Record<string, unknown>): string {
+    const nonEmpty = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== ""));
+    return Object.keys(nonEmpty).length ? `&params=${encodeURIComponent(JSON.stringify(nonEmpty))}` : "";
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -63,14 +77,26 @@ function usePublicWidgetRealtime(dashboardId: string, token: string, widgetId: s
     }, [dashboardId, token, widgetId]);
 }
 
-function EmbedWidget({ dashboardId, token, widget }: { dashboardId: string; token: string; widget: PublicWidget }) {
+function EmbedWidget({
+    dashboardId,
+    token,
+    widget,
+    params,
+}: {
+    dashboardId: string;
+    token: string;
+    widget: PublicWidget;
+    params: Record<string, unknown>;
+}) {
     const queryClient = useQueryClient();
-    const queryKey = ["embed-widget-data", dashboardId, widget.id];
+    const queryKey = ["embed-widget-data", dashboardId, widget.id, params];
 
     const { data, isLoading, error } = useQuery({
         queryKey,
         queryFn: () =>
-            fetchJson<WidgetData>(`/api/public/dashboards/${dashboardId}/widgets/${widget.id}/data?token=${token}`),
+            fetchJson<WidgetData>(
+                `/api/public/dashboards/${dashboardId}/widgets/${widget.id}/data?token=${token}${paramsQuery(params)}`
+            ),
         refetchInterval: 60_000,
     });
 
@@ -112,10 +138,27 @@ function EmbedWidget({ dashboardId, token, widget }: { dashboardId: string; toke
 }
 
 export function EmbedDashboard({ dashboardId, token }: { dashboardId: string; token: string }) {
+    const [paramValues, setParamValues] = useState<Record<string, unknown>>({});
+    const defaultsSeeded = useRef(false);
+
     const { data, isLoading, error } = useQuery({
         queryKey: ["embed-dashboard", dashboardId],
         queryFn: () => fetchJson<PublicDashboard>(`/api/public/dashboards/${dashboardId}?token=${token}`),
     });
+
+    // Seed the filter bar from each adjustable parameter's defaultValue once,
+    // the first time the dashboard shell arrives — same rationale as
+    // DashboardBuilder's identical effect: not on every refetch, or a
+    // viewer's in-progress edit would get stomped back to the default.
+    useEffect(() => {
+        if (!data || defaultsSeeded.current) return;
+        defaultsSeeded.current = true;
+        const defaults: Record<string, unknown> = {};
+        for (const p of data.parameters ?? []) {
+            if (p.defaultValue !== undefined) defaults[p.name] = p.defaultValue;
+        }
+        setParamValues(defaults);
+    }, [data]);
 
     if (isLoading)
         return <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">Loading…</div>;
@@ -128,12 +171,25 @@ export function EmbedDashboard({ dashboardId, token }: { dashboardId: string; to
     if (!data) return null;
 
     return (
-        <div className="h-screen overflow-auto bg-background p-3">
-            <div className="mb-3 text-sm font-medium">{data.title}</div>
-            <div className="grid auto-rows-[28px] grid-cols-12 gap-3">
-                {data.widgets.map((w) => (
-                    <EmbedWidget key={w.id} dashboardId={dashboardId} token={token} widget={w} />
-                ))}
+        <div className="flex h-screen flex-col overflow-hidden bg-background">
+            <div className="p-3 pb-0 text-sm font-medium">{data.title}</div>
+            <ParameterFilterBar
+                parameters={data.parameters ?? []}
+                values={paramValues}
+                onChange={(name, value) => setParamValues((v) => ({ ...v, [name]: value }))}
+            />
+            <div className="flex-1 overflow-auto p-3">
+                <div className="grid auto-rows-[28px] grid-cols-12 gap-3">
+                    {data.widgets.map((w) => (
+                        <EmbedWidget
+                            key={w.id}
+                            dashboardId={dashboardId}
+                            token={token}
+                            widget={w}
+                            params={paramValues}
+                        />
+                    ))}
+                </div>
             </div>
         </div>
     );

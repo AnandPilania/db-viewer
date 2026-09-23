@@ -1,9 +1,9 @@
 import { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { X, Pencil, Radio } from "lucide-react";
-import { ChartRenderer } from "@/components/ChartRenderer";
-import { useTableRealtime } from "@/hooks/useTableRealtime";
-import type { Widget, WidgetData } from "@/lib/api";
+import { ChartRenderer } from "./ChartRenderer.js";
+import { useTableRealtime } from "./useTableRealtime.js";
+import type { Widget, WidgetData } from "./api.js";
 
 const REFETCH_DEBOUNCE_MS = 750;
 
@@ -11,8 +11,13 @@ interface Props {
     id: string;
     title: string;
     chartType: Widget["chartType"];
+    /** "text" cards (B5) have no query at all — fetchData is never called for one. */
+    kind?: Widget["kind"];
+    content?: Widget["content"];
     fetchData: () => Promise<WidgetData>;
     onRemove?: () => void;
+    /** True while a previously-triggered onRemove is still in flight — disables the button so a slow request can't be double-fired. */
+    removing?: boolean;
     onEdit?: () => void;
     /** When provided, the header becomes the react-grid-layout drag handle instead of the whole card. */
     dragHandleClassName?: string;
@@ -20,31 +25,49 @@ interface Props {
     connectionId?: string;
     table?: string;
     highlightRules?: Widget["highlightRules"];
+    /**
+     * Dashboard filter-bar values this widget's filters actually reference
+     * (see api.ts's `widgetParamNames`) — folded into the query key so only
+     * a widget whose filters use a changed param refetches; a widget with no
+     * matching placeholder gets `{}` here and its key never changes.
+     */
+    params?: Record<string, unknown>;
+    /** Fired when the viewer clicks a data point — see ChartTypeProps. Never invoked for a text card. */
+    onDataPointClick?: (value: unknown) => void;
 }
 
 export function WidgetCard({
     id,
     title,
     chartType,
+    kind,
+    content,
     fetchData,
     onRemove,
+    removing,
     onEdit,
     dragHandleClassName,
     connectionId,
     table,
     highlightRules,
+    params,
+    onDataPointClick,
 }: Props) {
+    const isText = kind === "text";
     const queryClient = useQueryClient();
-    const queryKey = ["widget-data", id];
+    const queryKey = ["widget-data", id, params ?? {}];
 
     const { data, isLoading, error } = useQuery({
         queryKey,
         queryFn: fetchData,
+        // A text card has nothing to fetch — no `/api/widgets/:id/data` call
+        // ever fires for one.
+        enabled: !isText,
         // Widgets are aggregates over a whole table, not single rows, so on a
         // change we just refetch the aggregate rather than trying to patch it
         // incrementally — this poll interval is now just a safety net for
         // changes the realtime channel doesn't (or can't) catch.
-        refetchInterval: 30_000,
+        refetchInterval: isText ? false : 30_000,
         // A widget kept polling while its tab was in the background; a dashboard
         // left open all day was running its whole aggregate set every 30s for
         // nobody. The realtime channel covers changes while hidden.
@@ -100,32 +123,46 @@ export function WidgetCard({
                         <button
                             onClick={onRemove}
                             onMouseDown={(e) => e.stopPropagation()}
-                            className="text-muted-foreground hover:text-destructive"
+                            disabled={removing}
+                            className="text-muted-foreground hover:text-destructive disabled:pointer-events-none disabled:opacity-50"
                             aria-label="Remove widget"
                         >
-                            <X size={12} />
+                            <X size={12} className={removing ? "animate-spin" : undefined} />
                         </button>
                     )}
                 </div>
             </div>
             <div className="flex-1 overflow-hidden p-2">
-                {isLoading && (
-                    <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                        Loading…
-                    </div>
+                {isText ? (
+                    <div className="h-full overflow-auto whitespace-pre-wrap text-sm">{content}</div>
+                ) : (
+                    <>
+                        {isLoading && (
+                            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                                Loading…
+                            </div>
+                        )}
+                        {error && (
+                            <div className="flex h-full flex-col items-center justify-center gap-2 px-3 text-center text-xs text-destructive">
+                                <span>{(error as Error).message}</span>
+                                <button
+                                    onClick={() => void queryClient.invalidateQueries({ queryKey })}
+                                    className="underline hover:no-underline"
+                                >
+                                    Retry
+                                </button>
+                            </div>
+                        )}
+                        {data && (
+                            <ChartRenderer
+                                chartType={chartType}
+                                data={data}
+                                highlightRules={highlightRules}
+                                onDataPointClick={onDataPointClick}
+                            />
+                        )}
+                    </>
                 )}
-                {error && (
-                    <div className="flex h-full flex-col items-center justify-center gap-2 px-3 text-center text-xs text-destructive">
-                        <span>{(error as Error).message}</span>
-                        <button
-                            onClick={() => void queryClient.invalidateQueries({ queryKey })}
-                            className="underline hover:no-underline"
-                        >
-                            Retry
-                        </button>
-                    </div>
-                )}
-                {data && <ChartRenderer chartType={chartType} data={data} highlightRules={highlightRules} />}
             </div>
         </div>
     );

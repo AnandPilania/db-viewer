@@ -14,7 +14,7 @@ afterEach(() => {
 describe("embed token expiry", () => {
     const load = async () => {
         vi.resetModules();
-        return (await import("../apps/server/src/dashboard-store.js")).dashboardStore;
+        return (await import("../packages/modules/dashboards/src/server/dashboard-store.js")).dashboardStore;
     };
 
     it("expires a new token 30 days out by default", async () => {

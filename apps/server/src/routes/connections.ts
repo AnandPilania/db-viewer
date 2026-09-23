@@ -174,21 +174,6 @@ export async function connectionRoutes(app: FastifyInstance) {
         }
     });
 
-    app.post("/api/connections/:id/tables/:table/records", async (req, reply) => {
-        const { id, table } = req.params as { id: string; table: string };
-        const { schema, values } = req.body as { schema?: string; values: Record<string, unknown> };
-        try {
-            assertWritable(connectionStore.getConfig(id));
-            const conn = await connectionStore.getLive(id);
-            const inserted = await conn.insertRow(table, schema, values);
-            tableEvents.publish(id, table, { type: "insert", row: inserted });
-            reply.code(201);
-            return inserted;
-        } catch (err) {
-            return sendError(reply, err);
-        }
-    });
-
     app.delete("/api/connections/:id/tables/:table/records", async (req, reply) => {
         const { id, table } = req.params as { id: string; table: string };
         const { schema, primaryKey } = req.body as { schema?: string; primaryKey: Record<string, unknown> };

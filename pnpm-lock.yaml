@@ -23,6 +23,12 @@ importers:
       '@pilaniaanand/driver-interface':
         specifier: workspace:*
         version: link:packages/driver-interface
+      '@pilaniaanand/module-dashboards':
+        specifier: workspace:*
+        version: link:packages/modules/dashboards
+      '@pilaniaanand/module-record-create':
+        specifier: workspace:*
+        version: link:packages/modules/record-create
       fastify:
         specifier: ^5.12.3
         version: 5.12.3
@@ -87,6 +93,12 @@ importers:
       '@pilaniaanand/driver-interface':
         specifier: workspace:*
         version: link:../../packages/driver-interface
+      '@pilaniaanand/module-dashboards':
+        specifier: workspace:*
+        version: link:../../packages/modules/dashboards
+      '@pilaniaanand/module-record-create':
+        specifier: workspace:*
+        version: link:../../packages/modules/record-create
       fastify:
         specifier: ^5.12.3
         version: 5.12.3
@@ -146,6 +158,12 @@ importers:
       '@pilaniaanand/driver-interface':
         specifier: workspace:*
         version: link:../../packages/driver-interface
+      '@pilaniaanand/module-dashboards':
+        specifier: workspace:*
+        version: link:../../packages/modules/dashboards
+      '@pilaniaanand/module-record-create':
+        specifier: workspace:*
+        version: link:../../packages/modules/record-create
       '@tailwindcss/vite':
         specifier: ^4.3.3
         version: 4.3.3(vite@8.2.2(@types/node@26.4.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.13))
@@ -173,18 +191,9 @@ importers:
       react-dom:
         specifier: ^19.2.8
         version: 19.2.8(react@19.2.8)
-      react-grid-layout:
-        specifier: ^2.2.4
-        version: 2.2.4(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
-      react-resizable:
-        specifier: ^4.0.2
-        version: 4.0.2(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       reactflow:
         specifier: ^11.11.4
         version: 11.11.4(@types/react@19.2.18)(immer@11.1.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
-      recharts:
-        specifier: ^3.10.1
-        version: 3.10.1(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react-is@18.3.1)(react@19.2.8)(redux@5.0.1)
       tailwind-merge:
         specifier: ^3.6.0
         version: 3.6.0
@@ -318,6 +327,80 @@ importers:
       '@types/node':
         specifier: ^26.4.1
         version: 26.4.1
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
+  packages/modules/dashboards:
+    dependencies:
+      '@pilaniaanand/driver-interface':
+        specifier: workspace:*
+        version: link:../../driver-interface
+      '@tanstack/react-query':
+        specifier: ^5.102.8
+        version: 5.102.8(react@19.2.8)
+      fastify-plugin:
+        specifier: ^6.0.0
+        version: 6.0.0
+      jose:
+        specifier: ^5.9.6
+        version: 5.10.0
+      lucide-react:
+        specifier: ^1.41.0
+        version: 1.41.0(react@19.2.8)
+      nanoid:
+        specifier: ^6.0.1
+        version: 6.0.1
+      react-grid-layout:
+        specifier: ^2.2.4
+        version: 2.2.4(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      react-resizable:
+        specifier: ^4.0.2
+        version: 4.0.2(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      recharts:
+        specifier: ^3.10.1
+        version: 3.10.1(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react-is@18.3.1)(react@19.2.8)(redux@5.0.1)
+    devDependencies:
+      '@fastify/websocket':
+        specifier: ^11.3.0
+        version: 11.3.0
+      '@types/node':
+        specifier: ^26.4.1
+        version: 26.4.1
+      '@types/react':
+        specifier: ^19.2.18
+        version: 19.2.18
+      fastify:
+        specifier: ^5.12.3
+        version: 5.12.3
+      react:
+        specifier: ^19.2.8
+        version: 19.2.8
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
+  packages/modules/record-create:
+    dependencies:
+      '@pilaniaanand/driver-interface':
+        specifier: workspace:*
+        version: link:../../driver-interface
+      fastify-plugin:
+        specifier: ^6.0.0
+        version: 6.0.0
+    devDependencies:
+      '@types/node':
+        specifier: ^26.4.1
+        version: 26.4.1
+      '@types/react':
+        specifier: ^19.2.18
+        version: 19.2.18
+      fastify:
+        specifier: ^5.12.3
+        version: 5.12.3
+      react:
+        specifier: ^19.2.8
+        version: 19.2.8
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -2151,6 +2234,9 @@ packages:
   jiti@2.7.0:
     resolution: {integrity: sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==}
     hasBin: true
+
+  jose@5.10.0:
+    resolution: {integrity: sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg==}
 
   joycon@3.1.1:
     resolution: {integrity: sha512-34wB/Y7MW7bzjKRjUKTa46I2Z7eV62Rkhva+KkopW7Qvv/OSWBqvkSY7vusOPrNuZcUG3tApvdVgNB8POj3SPw==}
@@ -5164,6 +5250,8 @@ snapshots:
       set-function-name: 2.0.2
 
   jiti@2.7.0: {}
+
+  jose@5.10.0: {}
 
   joycon@3.1.1: {}
 

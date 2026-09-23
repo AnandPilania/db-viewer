@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ColumnDefinition } from "@pilaniaanand/driver-interface";
+import { validateValue, placeholderFor } from "@pilaniaanand/driver-interface";
 import { ArrowDown, ArrowUp, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { validateValue, placeholderFor } from "@/lib/validation";
 
 export interface GridSort {
     column: string;

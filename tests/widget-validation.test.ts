@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { validateWidgetInput, validateWidgetPatch } from "../apps/server/src/widget-validation.js";
-import type { Widget } from "../apps/server/src/models.js";
+import {
+    validateWidgetInput,
+    validateWidgetPatch,
+} from "../packages/modules/dashboards/src/server/widget-validation.js";
+import type { Widget } from "../packages/modules/dashboards/src/server/models.js";
 
 const valid = {
     title: "Orders by status",

@@ -1,10 +1,17 @@
 import { useState } from "react";
 import { Filter, Plus, X } from "lucide-react";
-import type { ColumnDefinition, FilterNode, FilterOperator } from "@pilaniaanand/driver-interface";
+import {
+    flattenFilters,
+    isFilterGroup,
+    type ColumnDefinition,
+    type FilterNode,
+    type FilterOperator,
+} from "@pilaniaanand/driver-interface";
 import { Button } from "@/components/ui/button";
 import {
     compileDraft,
     countConditions,
+    draftFromApplied,
     editAt,
     emptyRoot,
     isGroup,
@@ -52,16 +59,24 @@ interface Props {
 
 export function FilterBar({ columns, applied, onApply }: Props) {
     const [open, setOpen] = useState(false);
-    const [root, setRoot] = useState<DraftGroup>(emptyRoot);
+    // Lazy initializer: a fresh mount (e.g. drill-to-detail navigating to the
+    // Data tab) can already have a non-empty `applied` on the very first
+    // render, before the prevApplied-diffing below ever runs — so the draft
+    // has to start from `applied`, not unconditionally empty.
+    const [root, setRoot] = useState<DraftGroup>(() =>
+        applied.length === 0 ? emptyRoot() : draftFromApplied(applied)
+    );
 
-    // The parent clears filters when the table changes; the draft names columns
-    // of that old table, so it goes with them. Adjusted during render (React's
-    // documented pattern for resetting state on a prop change) rather than in
-    // an effect, so there's no extra frame where the draft still names the old table.
+    // The parent clears filters when the table changes (the draft names columns
+    // of that old table, so it goes with them) and pre-applies one when landing
+    // from drill-to-detail — either way the draft needs to mirror `applied`
+    // rather than keep showing whatever was last open. Adjusted during render
+    // (React's documented pattern for resetting state on a prop change) rather
+    // than in an effect, so there's no extra frame showing the stale draft.
     const [prevApplied, setPrevApplied] = useState(applied);
     if (prevApplied !== applied) {
         setPrevApplied(applied);
-        if (applied.length === 0) setRoot(emptyRoot());
+        setRoot(applied.length === 0 ? emptyRoot() : draftFromApplied(applied));
     }
 
     function edit(path: number[], fn: (target: DraftNode) => DraftNode | null) {
@@ -86,6 +101,17 @@ export function FilterBar({ columns, applied, onApply }: Props) {
     }
 
     const activeCount = applied.length > 0 ? countConditions(root) : 0;
+
+    // Plain-text readout of what's applied, e.g. `status = "Done"` — visible
+    // without opening the editor, so a drill-to-detail landing (or any other
+    // pre-applied filter) shows *why* these are the rows on screen.
+    const summary = flattenFilters(applied)
+        .map((c) => {
+            const opLabel = OPS.find((o) => o.op === c.op)?.label ?? c.op;
+            if (NULL_OPS.has(c.op)) return `${c.column} ${opLabel}`;
+            return `${c.column} ${opLabel} ${JSON.stringify(c.value)}`;
+        })
+        .join(applied.some(isFilterGroup) ? " / " : " and ");
 
     function renderCondition(node: DraftCondition, path: number[]) {
         return (
@@ -235,6 +261,7 @@ export function FilterBar({ columns, applied, onApply }: Props) {
                         Clear
                     </Button>
                 )}
+                {summary && <span className="truncate text-xs text-muted-foreground">{summary}</span>}
             </div>
 
             {open && (

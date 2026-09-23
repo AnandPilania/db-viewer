@@ -15,6 +15,8 @@
         "@fastify/static": "^10.1.3",
         "@fastify/websocket": "^11.3.0",
         "@pilaniaanand/driver-interface": "workspace:*",
+        "@pilaniaanand/module-dashboards": "workspace:*",
+        "@pilaniaanand/module-record-create": "workspace:*",
         "fastify": "^5.12.3",
         "fastify-plugin": "^6.0.0",
         "nanoid": "^6.0.1",

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { fetchWidgetData } from "../apps/server/src/chart-query.js";
-import type { Widget } from "../apps/server/src/models.js";
+import { fetchWidgetData } from "../packages/modules/dashboards/src/server/chart-query.js";
+import type { Widget } from "../packages/modules/dashboards/src/server/models.js";
 import type { ConnectionConfig, DriverConnection, QuerySpec } from "@pilaniaanand/driver-interface";
 
 /**

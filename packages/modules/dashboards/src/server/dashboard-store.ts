@@ -2,9 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { nanoid } from "nanoid";
-import { DATA_DIR } from "./crypto.js";
-import { logger } from "./logger.js";
-import type { Dashboard, DashboardLayoutItem } from "./models.js";
+import { DATA_DIR } from "./data-dir.js";
+import type { Dashboard, DashboardAnnotation, DashboardLayoutItem, DashboardParameter } from "./models.js";
 
 const STORE_PATH = path.join(DATA_DIR, "dashboards.json");
 
@@ -27,7 +26,11 @@ class DashboardStore {
       const raw: Dashboard[] = JSON.parse(fs.readFileSync(STORE_PATH, "utf-8"));
       for (const d of raw) this.dashboards.set(d.id, d);
     } catch (err) {
-      logger.error({ err }, "Failed to load persisted dashboards");
+      // ponytail: corrupt-persisted-file is a rare edge case; console.error
+      // rather than threading the app's daily-rotating logger in as a plugin
+      // option just for this one path. Wire it in if this ever needs to land
+      // in the same log file.
+      console.error("Failed to load persisted dashboards", err);
     }
   }
 
@@ -41,8 +44,11 @@ class DashboardStore {
       id: nanoid(),
       title,
       layout: [],
+      parameters: [],
+      annotations: [],
       embedEnabled: false,
       shareToken: null,
+      embedSecret: null,
       createdAt: new Date().toISOString(),
     };
     this.dashboards.set(dashboard.id, dashboard);
@@ -74,6 +80,28 @@ class DashboardStore {
     return d;
   }
 
+  updateParameters(id: string, parameters: DashboardParameter[]): Dashboard {
+    const d = this.get(id);
+    d.parameters = parameters;
+    this.save();
+    return d;
+  }
+
+  /** Empty string clears the folder (ungrouped) rather than storing a blank tag. */
+  updateFolder(id: string, folder: string): Dashboard {
+    const d = this.get(id);
+    d.folder = folder.trim() || undefined;
+    this.save();
+    return d;
+  }
+
+  updateAnnotations(id: string, annotations: DashboardAnnotation[]): Dashboard {
+    const d = this.get(id);
+    d.annotations = annotations;
+    this.save();
+    return d;
+  }
+
   /** Toggling embedding on (re)generates the share token, so disabling-then-enabling revokes any previously shared link. */
   setEmbedEnabled(id: string, enabled: boolean): Dashboard {
     const d = this.get(id);
@@ -81,14 +109,17 @@ class DashboardStore {
     if (enabled) return this.issueToken(d);
     d.shareToken = null;
     d.shareTokenExpiresAt = null;
+    d.embedSecret = null;
     this.save();
     return d;
   }
 
   /**
-   * Issues a fresh token and invalidates the previous one immediately. This
-   * is the revocation path: a link that leaked into a wiki, a chat, or a
-   * browser history stops working the moment this is called.
+   * Issues a fresh token (and embed secret) and invalidates the previous
+   * ones immediately. This is the revocation path: a link — or a signed
+   * embed integration — that leaked stops working the moment this is
+   * called. Both are rotated together since they share one lifecycle;
+   * nothing today needs to rotate the secret independently of the token.
    */
   rotateShareToken(id: string): Dashboard {
     const d = this.get(id);
@@ -99,6 +130,7 @@ class DashboardStore {
   private issueToken(d: Dashboard): Dashboard {
     d.shareToken = crypto.randomBytes(24).toString("hex");
     d.shareTokenExpiresAt = tokenExpiry();
+    d.embedSecret = crypto.randomBytes(32).toString("hex");
     this.save();
     return d;
   }

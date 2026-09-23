@@ -56,6 +56,13 @@ function mapMysqlType(dataType: string): ColumnType {
     return "unknown";
 }
 
+/** Parses MySQL's `enum('a','b','c')` COLUMN_TYPE text into ["a","b","c"], or undefined if it isn't an enum. */
+function parseEnumValues(columnType: string): string[] | undefined {
+    const match = columnType.match(/^enum\((.+)\)$/i);
+    if (!match) return undefined;
+    return Array.from(match[1].matchAll(/'((?:[^'\\]|\\.)*)'/g)).map((m) => m[1].replace(/\\'/g, "'"));
+}
+
 function encodeCursor(values: unknown[]): string {
     return Buffer.from(JSON.stringify(values)).toString("base64");
 }
@@ -106,6 +113,102 @@ class MysqlConnection implements DriverConnection {
     }
 
     /**
+     * Constraint metadata additional to the base column sweep: max length,
+     * enum values, single-column uniqueness, and (best-effort) CHECK clause
+     * text. Optionally scoped to one table. Never throws — a query that
+     * fails or returns nothing just leaves those columns without the field.
+     */
+    private async constraintMeta(table?: string): Promise<{
+        maxLengths: Map<string, number>;
+        enums: Map<string, string[]>;
+        uniques: Set<string>;
+        checks: Map<string, string>;
+    }> {
+        const filter = table ? "AND TABLE_NAME = ?" : "";
+        const params = table ? [this.database, table] : [this.database];
+
+        const maxLengths = new Map<string, number>();
+        const enums = new Map<string, string[]>();
+        const uniques = new Set<string>();
+        const checks = new Map<string, string>();
+
+        try {
+            const [cols] = await this.pool.query<RowDataPacket[]>(
+                `SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name, CHARACTER_MAXIMUM_LENGTH AS maxLength,
+                    COLUMN_TYPE AS columnType
+         FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? ${filter}`,
+                params
+            );
+            for (const c of cols) {
+                const key = `${c.tbl}.${c.name}`;
+                if (c.maxLength != null) maxLengths.set(key, Number(c.maxLength));
+                const enumValues = parseEnumValues(String(c.columnType ?? ""));
+                if (enumValues) enums.set(key, enumValues);
+            }
+        } catch {
+            /* best-effort — leave maxLength/enum unset */
+        }
+
+        try {
+            const [stats] = await this.pool.query<RowDataPacket[]>(
+                `SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name, INDEX_NAME AS idx
+         FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND NON_UNIQUE = 0 ${filter}`,
+                params
+            );
+            // A composite unique index doesn't make any one column unique on its
+            // own — only keep indexes with exactly one column.
+            const columnsByIndex = new Map<string, Set<string>>();
+            for (const s of stats) {
+                const idxKey = `${s.tbl}.${s.idx}`;
+                const set = columnsByIndex.get(idxKey) ?? new Set<string>();
+                set.add(`${s.tbl}.${s.name}`);
+                columnsByIndex.set(idxKey, set);
+            }
+            for (const set of columnsByIndex.values()) if (set.size === 1) uniques.add([...set][0]);
+        } catch {
+            /* best-effort — leave isUnique unset */
+        }
+
+        try {
+            // MySQL 8.0.16+ only — older servers (and MariaDB) don't have this
+            // table at all, so a failure here is expected, not exceptional.
+            const [colRows] = await this.pool.query<RowDataPacket[]>(
+                `SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = ? ${filter}`,
+                params
+            );
+            const columnsByTable = new Map<string, string[]>();
+            for (const c of colRows) {
+                const list = columnsByTable.get(c.tbl) ?? [];
+                list.push(c.name);
+                columnsByTable.set(c.tbl, list);
+            }
+            const [checkRows] = await this.pool.query<RowDataPacket[]>(
+                `SELECT tc.TABLE_NAME AS tbl, cc.CHECK_CLAUSE AS clause
+         FROM information_schema.CHECK_CONSTRAINTS cc
+         JOIN information_schema.TABLE_CONSTRAINTS tc
+           ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+         WHERE cc.CONSTRAINT_SCHEMA = ? ${filter.replace("TABLE_NAME", "tc.TABLE_NAME")}`,
+                params
+            );
+            for (const row of checkRows) {
+                // A CHECK clause has no direct column pointer in this metadata — as
+                // a best-effort, attach it to the one column of this table whose
+                // name literally appears in the clause text. Ambiguous (0 or 2+
+                // matches) is left unattached rather than guessed.
+                const candidates = (columnsByTable.get(row.tbl) ?? []).filter((name) =>
+                    new RegExp(`\\b${name}\\b`).test(row.clause)
+                );
+                if (candidates.length === 1) checks.set(`${row.tbl}.${candidates[0]}`, row.clause);
+            }
+        } catch {
+            /* CHECK_CONSTRAINTS unavailable on this server — no check-clause metadata */
+        }
+
+        return { maxLengths, enums, uniques, checks };
+    }
+
+    /**
      * Every column and foreign key in the database in two catalog queries,
      * grouped by table. Each table's entry is seeded into the metadata cache
      * on the way out, so the per-table describeColumns() calls that follow
@@ -113,7 +216,7 @@ class MysqlConnection implements DriverConnection {
      */
     private schemaColumns(): Promise<Map<string, ColumnDefinition[]>> {
         return this.metadata.get("schema-cols", async () => {
-            const [[cols], [fks]] = await Promise.all([
+            const [[cols], [fks], constraints] = await Promise.all([
                 this.pool.query<RowDataPacket[]>(
                     `SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name, DATA_TYPE AS dataType, IS_NULLABLE AS nullable,
                   COLUMN_KEY AS colKey, COLUMN_DEFAULT AS defaultValue
@@ -128,12 +231,14 @@ class MysqlConnection implements DriverConnection {
            WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME IS NOT NULL`,
                     [this.database]
                 ),
+                this.constraintMeta(),
             ]);
 
             const fkMap = new Map(fks.map((f) => [`${f.tbl}.${f.col}`, f]));
             const byTable = new Map<string, ColumnDefinition[]>();
             for (const c of cols) {
-                const fk = fkMap.get(`${c.tbl}.${c.name}`);
+                const key = `${c.tbl}.${c.name}`;
+                const fk = fkMap.get(key);
                 const list = byTable.get(c.tbl) ?? [];
                 list.push({
                     name: c.name,
@@ -144,6 +249,10 @@ class MysqlConnection implements DriverConnection {
                     isForeignKey: !!fk,
                     references: fk ? { table: fk.refTable, column: fk.refCol } : undefined,
                     defaultValue: c.defaultValue,
+                    maxLength: constraints.maxLengths.get(key),
+                    enumValues: constraints.enums.get(key),
+                    isUnique: constraints.uniques.has(key) || undefined,
+                    checkExpression: constraints.checks.get(key),
                 });
                 byTable.set(c.tbl, list);
             }
@@ -171,7 +280,9 @@ class MysqlConnection implements DriverConnection {
        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL`,
             [this.database, table]
         );
+        const constraints = await this.constraintMeta(table);
         return cols.map((c) => {
+            const key = `${table}.${c.name}`;
             const fk = fks.find((f) => f.col === c.name);
             return {
                 name: c.name,
@@ -182,6 +293,10 @@ class MysqlConnection implements DriverConnection {
                 isForeignKey: !!fk,
                 references: fk ? { table: fk.refTable, column: fk.refCol } : undefined,
                 defaultValue: c.defaultValue,
+                maxLength: constraints.maxLengths.get(key),
+                enumValues: constraints.enums.get(key),
+                isUnique: constraints.uniques.has(key) || undefined,
+                checkExpression: constraints.checks.get(key),
             };
         });
     }

@@ -84,7 +84,18 @@ table/pivot) on a drag-and-resize grid. Each widget carries filters across
 ten operators, optional calendar bucketing of a date axis by
 day/week/month/quarter/year, a sort field and direction, a row cap, and
 conditional highlight rules. Widgets refetch immediately when their
-underlying table changes rather than waiting out a poll interval.
+underlying table changes rather than waiting out a poll interval. A dashboard
+can also carry its own parameter filter bar (values widgets' saved filters
+reference by placeholder), and a widget's data-point click can either
+cross-filter that bar or drill to the underlying rows in the Data tab with
+the same column pre-filtered (a null bucket filters with `IS NULL`, not a
+literal-null comparison). Async failures (a widget query, a dashboard save)
+surface as a toast instead of only landing in the server log.
+
+A dashboard mixing widgets from more than one connection is rejected unless
+every connection involved has opted in (`allowMultiDbDashboards`) — an
+embedded dashboard's share token grants read access to whatever connections
+its widgets touch, so mixing is opt-in rather than automatic.
 
 **Embedding.** A dashboard can be published behind a random share token.
 Public routes only ever replay a widget's saved query — there is no way to
@@ -148,7 +159,8 @@ database role that only has `SELECT`, or point it at a read replica.
 
 pnpm workspace. `apps/server` is Fastify 5, `apps/web` is React + Vite +
 Tailwind, `packages/driver-interface` holds the `DatabaseDriver` contract
-every driver implements, and `packages/drivers/*` are the implementations.
+every driver implements, `packages/drivers/*` are the implementations, and
+`packages/modules/*` are optional feature packages (see below).
 
 ```bash
 pnpm install
@@ -158,7 +170,13 @@ pnpm typecheck
 pnpm build
 ```
 
-`pnpm dev:server` and `pnpm dev:web` run the two halves separately.
+`pnpm dev` also runs `tsc -b -w` for every `packages/modules/*` package, since
+`apps/web`/`apps/server` import their built `dist/` output (through each
+module's `exports` map) rather than their TypeScript source — Vite doesn't
+watch `node_modules`, where the workspace symlinks resolve to, so a module
+only hot-reloads once its own watch rebuild has written new `dist/` files.
+`pnpm dev:server` and `pnpm dev:web` run the app halves separately (without
+the module watchers).
 
 ### Adding a driver
 
@@ -168,6 +186,29 @@ pnpm build
 
 Nothing else changes — the server, the connection store, and every frontend
 component talk only to the shared interface.
+
+### Modules
+
+`packages/modules/dashboards` and `packages/modules/record-create` are
+optional feature packages, each with its own `./web` and `./server` export
+and its own build (`tsconfig.web.json` / `tsconfig.server.json`). Neither
+imports anything from `apps/web/src` or `apps/server/src` — the host app
+wires each one in through a small install function instead:
+
+- **Server**: a Fastify plugin, registered with `app.register(...)` and
+  handed whatever it needs (`connectionStore`, `tableEvents`, …) as plugin
+  options — see `apps/server/src/index.ts`.
+- **Web**: an `install(registerX, options)` call in `apps/web/src/main.tsx`.
+  Dashboards' `install` takes an `onDrillToTable` callback so drill-to-detail
+  can navigate the host app's own table browser without the module importing
+  it directly (`apps/web/src/lib/drillNav.ts` is the other end of that
+  boundary). Commenting out either `install(...)` call is the concrete proof
+  each module is fully optional: the corresponding nav item / grid action
+  just disappears.
+
+A new module follows the same shape: a package under `packages/modules/`
+with `./web` and `./server` exports, an `install` function on each side, and
+no direct import of the host app.
 
 ## Contributing
 

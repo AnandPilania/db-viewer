@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { nanoid } from "nanoid";
-import { DATA_DIR } from "./crypto.js";
-import { logger } from "./logger.js";
+import { DATA_DIR } from "./data-dir.js";
 import type { Widget } from "./models.js";
 
 const STORE_PATH = path.join(DATA_DIR, "widgets.json");
@@ -16,7 +15,9 @@ class WidgetStore {
       const raw: Widget[] = JSON.parse(fs.readFileSync(STORE_PATH, "utf-8"));
       for (const w of raw) this.widgets.set(w.id, w);
     } catch (err) {
-      logger.error({ err }, "Failed to load persisted widgets");
+      // ponytail: see dashboard-store.ts's constructor for why this is
+      // console.error instead of the app's shared logger.
+      console.error("Failed to load persisted widgets", err);
     }
   }
 

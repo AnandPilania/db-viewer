@@ -42,10 +42,16 @@ interface PageParam {
 
 const FIRST_PAGE: PageParam = { cursor: null, seek: null, index: 0 };
 
-export function useTableRows(connectionId: string | null, table: string | null, schema?: string) {
+export function useTableRows(
+    connectionId: string | null,
+    table: string | null,
+    schema?: string,
+    /** Seeds the filter state once, e.g. drill-to-detail (B3) landing on a table pre-filtered to one column/value. */
+    initialFilter?: FilterNode | null
+) {
     const queryClient = useQueryClient();
     const [sort, setSort] = useState<TableSort | null>(null);
-    const [filters, setFilters] = useState<FilterNode[]>([]);
+    const [filters, setFilters] = useState<FilterNode[]>(initialFilter ? [initialFilter] : []);
     /** Non-null once the user has jumped; the window's rows start at an unknown absolute offset. */
     const [anchor, setAnchor] = useState<{ seek: unknown[]; label: string } | null>(null);
     const [localRows, setLocalRows] = useState<Record<string, unknown>[] | null>(null);
@@ -109,13 +115,22 @@ export function useTableRows(connectionId: string | null, table: string | null, 
     }
 
     // Reset the view — but not the user's sort — when the target changes.
-    // Filters do reset: they name columns of the table being left.
-    const [prevTarget, setPrevTarget] = useState({ connectionId, table, schema });
-    if (prevTarget.connectionId !== connectionId || prevTarget.table !== table || prevTarget.schema !== schema) {
-        setPrevTarget({ connectionId, table, schema });
+    // Filters do reset: they name columns of the table being left. A new
+    // initialFilter re-seeds them instead of clearing to [] — this is what
+    // lets a second drill-to-detail click (same table, different value) take
+    // effect even though connectionId/table/schema didn't change.
+    const filterSeedKey = initialFilter ? JSON.stringify(initialFilter) : null;
+    const [prevTarget, setPrevTarget] = useState({ connectionId, table, schema, filterSeedKey });
+    if (
+        prevTarget.connectionId !== connectionId ||
+        prevTarget.table !== table ||
+        prevTarget.schema !== schema ||
+        prevTarget.filterSeedKey !== filterSeedKey
+    ) {
+        setPrevTarget({ connectionId, table, schema, filterSeedKey });
         setAnchor(null);
         setLocalRows(null);
-        setFilters([]);
+        setFilters(initialFilter ? [initialFilter] : []);
     }
 
     /**

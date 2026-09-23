@@ -1,4 +1,11 @@
-import type { ColumnDefinition, FilterGroup, FilterNode, FilterOperator } from "@pilaniaanand/driver-interface";
+import {
+    isFilterGroup,
+    type ColumnDefinition,
+    type FilterGroup,
+    type FilterNode,
+    type FilterOperator,
+    type QueryFilter,
+} from "@pilaniaanand/driver-interface";
 
 const NULL_OPS = new Set<FilterOperator>(["is_null", "is_not_null"]);
 /** Operators whose value is a comma-separated list rather than one scalar. */
@@ -87,6 +94,23 @@ export function editAt(node: DraftNode, path: number[], fn: (target: DraftNode) 
         return edited ? [edited] : [];
     });
     return { ...node, conditions };
+}
+
+function conditionToDraft(node: QueryFilter): DraftCondition {
+    if (NULL_OPS.has(node.op)) return { column: node.column, op: node.op, value: "" };
+    const value = LIST_OPS.has(node.op) && Array.isArray(node.value) ? node.value.join(", ") : String(node.value ?? "");
+    return { column: node.column, op: node.op, value };
+}
+
+function nodeToDraft(node: FilterNode): DraftNode {
+    return isFilterGroup(node)
+        ? { combinator: node.combinator, conditions: node.conditions.map(nodeToDraft) }
+        : conditionToDraft(node);
+}
+
+/** The editor's counterpart to compileDraft — seeds the draft from an already-applied tree (e.g. a filter the drill-to-detail flow pre-applies), so opening the editor shows what's actually active instead of an empty form. */
+export function draftFromApplied(applied: FilterNode[]): DraftGroup {
+    return { combinator: "and", conditions: applied.map(nodeToDraft) };
 }
 
 /** NULL_OPS is also needed by the FilterBar UI (to hide the value input). */

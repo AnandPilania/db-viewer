@@ -4,11 +4,31 @@ import { QueryClient, QueryClientProvider, QueryCache, MutationCache } from "@ta
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { installGlobalErrorReporting, reportClientError } from "./lib/report-error";
+import { registerGridAction } from "./lib/gridActions";
+import { registerNavView } from "./lib/navViews";
+import { drillToTable } from "./lib/drillNav";
+import { install as installRecordCreate } from "@pilaniaanand/module-record-create/web";
+import { install as installDashboards } from "@pilaniaanand/module-dashboards/web";
 import "./index.css";
 
 installGlobalErrorReporting();
 
-const EmbedDashboard = lazy(() => import("./components/EmbedDashboard").then((m) => ({ default: m.EmbedDashboard })));
+// Commenting this out is the concrete proof the record-creation module is
+// fully optional: the "New row" button disappears and getGridActions()
+// returns [].
+installRecordCreate(registerGridAction);
+
+// Commenting this out is the concrete proof the dashboards module is fully
+// optional: the "Dashboards" nav item disappears and getNavViews() returns [].
+// `onDrillToTable` is the B3 drill-to-detail boundary: the module calls it
+// with a {connectionId, table, column, value}, and drillToTable (lib/drillNav)
+// forwards it to whatever handler App.tsx has registered — this module never
+// imports App.tsx or TableBrowser directly.
+installDashboards(registerNavView, { onDrillToTable: drillToTable });
+
+const EmbedDashboard = lazy(() =>
+    import("@pilaniaanand/module-dashboards/web/embed").then((m) => ({ default: m.EmbedDashboard }))
+);
 
 // Reporting here is purely for the daily server log — it doesn't replace a
 // component's own `isError`/`mutation.isError` handling, which is still
