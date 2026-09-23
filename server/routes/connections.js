@@ -169,21 +169,6 @@ export async function connectionRoutes(app) {
             return sendError(reply, err);
         }
     });
-    app.post("/api/connections/:id/tables/:table/records", async (req, reply) => {
-        const { id, table } = req.params;
-        const { schema, values } = req.body;
-        try {
-            assertWritable(connectionStore.getConfig(id));
-            const conn = await connectionStore.getLive(id);
-            const inserted = await conn.insertRow(table, schema, values);
-            tableEvents.publish(id, table, { type: "insert", row: inserted });
-            reply.code(201);
-            return inserted;
-        }
-        catch (err) {
-            return sendError(reply, err);
-        }
-    });
     app.delete("/api/connections/:id/tables/:table/records", async (req, reply) => {
         const { id, table } = req.params;
         const { schema, primaryKey } = req.body;

@@ -1,35 +1,35 @@
 {
-    "name": "@pilaniaanand/module-record-create",
-    "version": "0.5.4",
-    "type": "module",
-    "exports": {
-        "./web": "./dist/web/index.js",
-        "./server": "./dist/server/index.js"
-    },
-    "scripts": {
-        "typecheck": "tsc --noEmit",
-        "build": "tsc -p tsconfig.web.json && tsc -p tsconfig.server.json",
-        "dev": "tsc -b -w --preserveWatchOutput tsconfig.web.json tsconfig.server.json"
-    },
-    "dependencies": {
-        "@pilaniaanand/driver-interface": "workspace:*",
-        "fastify-plugin": "^6.0.0"
-    },
-    "peerDependencies": {
-        "fastify": "^5",
-        "react": "^19"
-    },
-    "devDependencies": {
-        "@types/node": "^26.4.1",
-        "@types/react": "^19.2.18",
-        "fastify": "^5.12.3",
-        "react": "^19.2.8",
-        "typescript": "^7.0.2"
-    },
-    "files": [
-        "dist"
-    ],
-    "publishConfig": {
-        "access": "public"
-    }
+  "name": "@pilaniaanand/module-record-create",
+  "version": "0.6.0",
+  "type": "module",
+  "exports": {
+    "./web": "./dist/web/index.js",
+    "./server": "./dist/server/index.js"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.web.json && tsc -p tsconfig.server.json",
+    "dev": "tsc -b -w --preserveWatchOutput tsconfig.web.json tsconfig.server.json"
+  },
+  "dependencies": {
+    "@pilaniaanand/driver-interface": "workspace:*",
+    "fastify-plugin": "^6.0.0"
+  },
+  "peerDependencies": {
+    "fastify": "^5",
+    "react": "^19"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@types/react": "^19.2.18",
+    "fastify": "^5.12.3",
+    "react": "^19.2.8",
+    "typescript": "^7.0.2"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }
