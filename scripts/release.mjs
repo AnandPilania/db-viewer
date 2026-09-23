@@ -17,7 +17,7 @@
 //                                               skips any package whose target
 //                                               version is already on the registry
 //
-// All 7 packages (db-viewer + driver-interface + 6 drivers) are versioned
+// All 9 packages (db-viewer + driver-interface + 6 drivers + 2 modules) are versioned
 // in lockstep — same version number for all of them on every release. This
 // is a deliberate simplification: db-viewer's package.json depends on
 // @pilaniaanand/driver-interface via "workspace:*" in source (never hand-edit
@@ -120,7 +120,7 @@ async function confirm(question) {
     return /^y(es)?$/i.test(answer.trim());
 }
 
-class UsageError extends Error {}
+class UsageError extends Error { }
 
 function bumpVersion(current, kind) {
     if (/^\d+\.\d+\.\d+$/.test(kind)) return kind; // exact version passed directly
@@ -195,7 +195,7 @@ function preflight({ dryRun }) {
     if (!pnpmCheck.ok) {
         problems.push(
             `pnpm isn't runnable — ${pnpmCheck.reason}. This script publishes via "pnpm publish" ` +
-                `so workspace:* ranges get rewritten correctly; verify "pnpm --version" works in this same terminal.`
+            `so workspace:* ranges get rewritten correctly; verify "pnpm --version" works in this same terminal.`
         );
     }
 
@@ -290,8 +290,8 @@ async function main() {
         if (result.status !== 0) {
             console.error(
                 `\nPublish failed for ${p.name}. Packages published before this one are already live —\n` +
-                    `fix the problem and re-run with --resume to pick up where this left off (already-\n` +
-                    `published packages at this version will be skipped automatically).`
+                `fix the problem and re-run with --resume to pick up where this left off (already-\n` +
+                `published packages at this version will be skipped automatically).`
             );
             process.exit(1);
         }
